@@ -63,7 +63,7 @@
 #define DMA_RX_BURST_SIZE		0x3F000000
 
 #define DMA_BURST_SHIFT			24
-#define DMA_BURST_DEFAULT		1
+#define DMA_BURST_DEFAULT		8
 
 #define KS_DMA_TX_START			0x0008
 #define KS_DMA_RX_START			0x000C
@@ -787,6 +787,22 @@ enum {
 #define DESC_ALIGNMENT			16
 #define BUFFER_ALIGNMENT		8
 
+#define NUM_OF_RX_DESC_DEFAULT		64
+#define NUM_OF_TX_DESC_DEFAULT		64
+
+#if    defined(CONFIG_KSZ884X_PCI_XIPHOS_BYTE_ENABLE_WORKAROUND_MODULE) \
+    || defined(CONFIG_KSZ884X_PCI_XIPHOS_BYTE_ENABLE_WORKAROUND)
+static int bewa = 0;
+module_param(bewa, int, 0);
+MODULE_PARM_DESC(bewa, "Byte-enable workaround " \
+    "(rx_buf=1, tx_buf=2, ring=4, tx_addr=8, rx_addr=16)");
+#endif
+
+static int num_of_rx_desc = NUM_OF_RX_DESC_DEFAULT;
+module_param(num_of_rx_desc, int, 0);
+MODULE_PARM_DESC(num_of_rx_desc, "Number of receive buffers");
+
+static int num_of_tx_desc = NUM_OF_TX_DESC_DEFAULT;
 #define NUM_OF_RX_DESC			64
 #define NUM_OF_TX_DESC			64
 
@@ -947,8 +963,8 @@ union desc_buf {
 struct ksz_hw_desc {
 	union desc_stat ctrl;
 	union desc_buf buf;
-	u32 addr;
-	u32 next;
+	u32 addr_encoded;
+	u32 next_encoded;
 };
 
 /**
@@ -1482,6 +1498,24 @@ struct dev_priv {
 	int promiscuous;
 };
 
+#if    defined(CONFIG_KSZ884X_PCI_XIPHOS_BYTE_ENABLE_WORKAROUND_MODULE) \
+    || defined(CONFIG_KSZ884X_PCI_XIPHOS_BYTE_ENABLE_WORKAROUND)
+#define BEWA_FLAGS bewa
+#else
+#define BEWA_FLAGS 0
+#endif
+
+#define BEWA_MASK(flags__) ((BEWA_FLAGS & (flags__)) ? 0x10000000 : 0)
+
+#define BEWA_RX_BUF 1
+#define BEWA_TX_BUF 2
+#define BEWA_RING 4
+#define BEWA_TX_ADDR 8
+#define BEWA_RX_ADDR 16
+
+#define BEWA_ENCODE(flags__, x__) ((x__) | (BEWA_MASK(flags__)))
+#define BEWA_DECODE(flags__, x__) ((x__) & ~(BEWA_MASK(flags__)))
+
 #define DRV_NAME		"KSZ884X PCI"
 #define DEVICE_NAME		"KSZ884x PCI"
 #define DRV_VERSION		"1.0.0"
@@ -1622,7 +1656,8 @@ static void get_rx_pkt(struct ksz_desc_info *info, struct ksz_desc **desc)
 
 static inline void set_rx_buf(struct ksz_desc *desc, u32 addr)
 {
-	desc->phw->addr = cpu_to_le32(addr);
+	/*printk(KERN_DEBUG "rx buf : 0x%08x\n", addr);*/
+	desc->phw->addr_encoded = cpu_to_le32(BEWA_ENCODE(BEWA_RX_BUF, addr));
 }
 
 static inline void set_rx_len(struct ksz_desc *desc, u32 len)
@@ -1642,7 +1677,8 @@ static inline void get_tx_pkt(struct ksz_desc_info *info,
 
 static inline void set_tx_buf(struct ksz_desc *desc, u32 addr)
 {
-	desc->phw->addr = cpu_to_le32(addr);
+	/*printk(KERN_DEBUG "tx buf : 0x%08x\n", addr);*/
+	desc->phw->addr_encoded = cpu_to_le32(BEWA_ENCODE(BEWA_TX_BUF, addr));
 }
 
 static inline void set_tx_len(struct ksz_desc *desc, u32 len)
@@ -3852,9 +3888,10 @@ static void hw_init_desc(struct ksz_desc_info *desc_info, int transmit)
 		cur->phw = desc++;
 		phys += desc_info->size;
 		previous = cur++;
-		previous->phw->next = cpu_to_le32(phys);
+		previous->phw->next_encoded = cpu_to_le32(BEWA_ENCODE(BEWA_RING, phys));
 	}
-	previous->phw->next = cpu_to_le32(desc_info->ring_phys);
+	previous->phw->next_encoded = cpu_to_le32(BEWA_ENCODE(BEWA_RING,
+        desc_info->ring_phys));
 	previous->sw.buf.rx.end_of_ring = 1;
 	previous->phw->buf.data = cpu_to_le32(previous->sw.buf.data);
 
@@ -3875,8 +3912,8 @@ static void hw_init_desc(struct ksz_desc_info *desc_info, int transmit)
 static void hw_set_desc_base(struct ksz_hw *hw, u32 tx_addr, u32 rx_addr)
 {
 	/* Set base address of Tx/Rx descriptors. */
-	writel(tx_addr, hw->io + KS_DMA_TX_ADDR);
-	writel(rx_addr, hw->io + KS_DMA_RX_ADDR);
+	writel(BEWA_ENCODE(BEWA_TX_ADDR, tx_addr), hw->io + KS_DMA_TX_ADDR);
+	writel(BEWA_ENCODE(BEWA_RX_ADDR, rx_addr), hw->io + KS_DMA_RX_ADDR);
 }
 
 static void hw_reset_pkts(struct ksz_desc_info *info)
@@ -4471,6 +4508,7 @@ static void ksz_init_rx_buffers(struct dev_info *adapter)
 	struct ksz_hw *hw = &adapter->hw;
 	struct ksz_desc_info *info = &hw->rx_desc_info;
 
+	printk(KERN_DEBUG "init rx\n");
 	for (i = 0; i < hw->rx_desc_info.alloc; i++) {
 		get_rx_pkt(info, &desc);
 
@@ -4508,12 +4546,12 @@ static int ksz_alloc_mem(struct dev_info *adapter)
 	struct ksz_hw *hw = &adapter->hw;
 
 	/* Determine the number of receive and transmit descriptors. */
-	hw->rx_desc_info.alloc = NUM_OF_RX_DESC;
-	hw->tx_desc_info.alloc = NUM_OF_TX_DESC;
+	hw->rx_desc_info.alloc = num_of_rx_desc;
+	hw->tx_desc_info.alloc = num_of_tx_desc;
 
 	/* Determine how many descriptors to skip transmit interrupt. */
 	hw->tx_int_cnt = 0;
-	hw->tx_int_mask = NUM_OF_TX_DESC / 4;
+	hw->tx_int_mask = num_of_tx_desc / 4;
 	if (hw->tx_int_mask > 8)
 		hw->tx_int_mask = 8;
 	while (hw->tx_int_mask) {
@@ -4936,6 +4974,7 @@ static void netdev_tx_timeout(struct net_device *dev)
 
 	last_reset = jiffies;
 	if (hw_priv) {
+		printk(KERN_ERR "ksz884x: tx timeout, resetting\n");
 		hw_dis_intr(hw);
 		hw_disable(hw);
 
@@ -5012,7 +5051,13 @@ static inline int rx_proc(struct net_device *dev, struct ksz_hw* hw,
 
 	dma_buf = DMA_BUFFER(desc);
 	pci_dma_sync_single_for_cpu(
-		hw_priv->pdev, dma_buf->dma, packet_len + 4,
+		hw_priv->pdev, dma_buf->dma,
+		// XXX: Xiphos - checkme
+#if 0
+		packet_len + 4,
+#else
+		dma_buf->len,
+#endif
 		PCI_DMA_FROMDEVICE);
 
 	do {
@@ -5075,6 +5120,10 @@ static int dev_rcv_packets(struct dev_info *hw_priv)
 		}
 
 release_packet:
+		// XXX: Xiphos - checkme
+		pci_dma_sync_single_for_device(
+				hw_priv->pdev, DMA_BUFFER(desc)->dma,
+				desc->dma_buf.len, PCI_DMA_FROMDEVICE);
 		release_desc(desc);
 		next++;
 		next &= info->mask;
