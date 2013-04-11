@@ -35,12 +35,6 @@ config KS8842
 	  ethernet switch chip (managed, VLAN, QoS) from Micrel or
 	  Timberdale(FPGA).
 
-config KSZ884X_PCI_XIPHOS_BYTE_ENABLE_WORKAROUND
-	tristate "Xiphos byte-enable workaround for Micrel KSZ8841/2 PCI"
-	depends on KSZ884X_PCI
-	help
-	  Enable Xiphos byte-enable workaround KSZ884x.
-
 config KS8851
 	tristate "Micrel KS8851 SPI"
 	depends on SPI
@@ -68,5 +62,11 @@ config KSZ884X_PCI
 
 	  To compile this driver as a module, choose M here. The module
 	  will be called ksz884x.
+
+config KSZ884X_PCI_XIPHOS_BYTE_ENABLE_WORKAROUND
+	tristate "Xiphos byte-enable workaround for Micrel KSZ8841/2 PCI"
+	depends on KSZ884X_PCI
+	---help---
+	  Enable Xiphos byte-enable workaround KSZ884x.
 
 endif # NET_VENDOR_MICREL
