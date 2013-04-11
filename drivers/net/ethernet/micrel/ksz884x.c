@@ -803,8 +803,8 @@ module_param(num_of_rx_desc, int, 0);
 MODULE_PARM_DESC(num_of_rx_desc, "Number of receive buffers");
 
 static int num_of_tx_desc = NUM_OF_TX_DESC_DEFAULT;
-#define NUM_OF_RX_DESC			64
-#define NUM_OF_TX_DESC			64
+module_param(num_of_tx_desc, int, 0);
+MODULE_PARM_DESC(num_of_tx_desc, "Number of transmit buffers");
 
 #define KS_DESC_RX_FRAME_LEN		0x000007FF
 #define KS_DESC_RX_FRAME_TYPE		0x00008000
@@ -7039,6 +7039,7 @@ static int pcidev_init(struct pci_dev *pdev, const struct pci_device_id *id)
 	banner[13] = cnt + '0';		/* Replace x in "Micrel KSZ884x" */
 	dev_info(&hw_priv->pdev->dev, "%s\n", banner);
 	dev_dbg(&hw_priv->pdev->dev, "Mem = %p; IRQ = %d\n", hw->io, pdev->irq);
+	dev_info(&hw_priv->pdev->dev, "BEWA %d\n", BEWA_FLAGS);
 
 	/* Assume device is KSZ8841. */
 	hw->dev_count = 1;
