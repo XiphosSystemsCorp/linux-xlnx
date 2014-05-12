@@ -388,7 +388,8 @@ static int xilinx_spi_probe(struct platform_device *pdev)
 		goto put_master;
 	}
 
-	master->bus_num = pdev->dev.id;
+  /* Set bus_num to -1 so spi_register_master() will use OF alias */
+	master->bus_num = -1;
 	master->num_chipselect = num_cs;
 	master->dev.of_node = pdev->dev.of_node;
 
