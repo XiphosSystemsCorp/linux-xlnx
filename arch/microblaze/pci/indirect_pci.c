@@ -19,6 +19,26 @@
 #include <asm/prom.h>
 #include <asm/pci-bridge.h>
 
+static void xiphos_indirect_gpio_select(struct pci_controller *hose,
+    unsigned int devfn, bool enable)
+{
+  if (!hose->idsel_gpio) return;
+
+  if (enable && devfn) {
+    //printk(KERN_INFO "idsel goes up\n");
+    udelay(100);
+    out_le32(hose->idsel_gpio, 1 << ((devfn >> 3) - 1));
+    udelay(100);
+    //printk(KERN_INFO "idsel went up\n");
+  } else {
+    //printk(KERN_INFO "idsel goes to 0\n");
+    udelay(100);
+    out_le32(hose->idsel_gpio, 0);
+    udelay(100);
+    //printk(KERN_INFO "idsel went to 0\n");
+  }
+}
+
 static int
 indirect_read_config(struct pci_bus *bus, unsigned int devfn, int offset,
 		     int len, u32 *val)
@@ -27,6 +47,7 @@ indirect_read_config(struct pci_bus *bus, unsigned int devfn, int offset,
 	volatile void __iomem *cfg_data;
 	u8 cfg_type = 0;
 	u32 bus_no, reg;
+
 
 	if (hose->indirect_type & INDIRECT_TYPE_NO_PCIE_LINK) {
 		if (bus->number != hose->first_busno)
@@ -46,6 +67,8 @@ indirect_read_config(struct pci_bus *bus, unsigned int devfn, int offset,
 		reg = ((offset & 0xf00) << 16) | (offset & 0xfc);
 	else
 		reg = offset & 0xfc; /* Only 3 bits for function */
+
+	xiphos_indirect_gpio_select(hose, devfn, true);
 
 	if (hose->indirect_type & INDIRECT_TYPE_BIG_ENDIAN)
 		out_be32(hose->cfg_addr, (0x80000000 | (bus_no << 16) |
@@ -70,6 +93,9 @@ indirect_read_config(struct pci_bus *bus, unsigned int devfn, int offset,
 		*val = in_le32(cfg_data);
 		break;
 	}
+
+	xiphos_indirect_gpio_select(hose, devfn, false);
+
 	return PCIBIOS_SUCCESSFUL;
 }
 
@@ -100,6 +126,8 @@ indirect_write_config(struct pci_bus *bus, unsigned int devfn, int offset,
 		reg = ((offset & 0xf00) << 16) | (offset & 0xfc);
 	else
 		reg = offset & 0xfc;
+
+	xiphos_indirect_gpio_select(hose, devfn, true);
 
 	if (hose->indirect_type & INDIRECT_TYPE_BIG_ENDIAN)
 		out_be32(hose->cfg_addr, (0x80000000 | (bus_no << 16) |
@@ -136,6 +164,8 @@ indirect_write_config(struct pci_bus *bus, unsigned int devfn, int offset,
 		out_le32(cfg_data, val);
 		break;
 	}
+
+	xiphos_indirect_gpio_select(hose, devfn, false);
 
 	return PCIBIOS_SUCCESSFUL;
 }

@@ -58,6 +58,8 @@ struct pci_controller {
 	struct pci_ops *ops;
 	unsigned int __iomem *cfg_addr;
 	void __iomem *cfg_data;
+  void __iomem *bridge_addr;
+  u32 __iomem * idsel_gpio;
 
 	/*
 	 * Used for variants of PCI indirect handling and possible quirks:
