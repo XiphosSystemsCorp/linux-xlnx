@@ -63,6 +63,7 @@
 #define ZYNQ_QSPI_CONFIG_BDRATE_MASK	0x00000038 /* Baud Rate Divisor Mask */
 #define ZYNQ_QSPI_CONFIG_CPHA_MASK	0x00000004 /* Clock Phase Control */
 #define ZYNQ_QSPI_CONFIG_CPOL_MASK	0x00000002 /* Clock Polarity Control */
+#define ZYNQ_QSPI_CONFIG_PCS_MASK	0x00000400 /* Peri chip select */
 #define ZYNQ_QSPI_CONFIG_SSCTRL_MASK	0x00003C00 /* Slave Select Mask */
 #define ZYNQ_QSPI_CONFIG_FWIDTH_MASK	0x000000C0 /* FIFO width */
 #define ZYNQ_QSPI_CONFIG_MSTREN_MASK	0x00000001 /* Master Mode */
@@ -401,6 +402,7 @@ static void zynq_qspi_chipselect(struct spi_device *qspi, int is_on)
 {
 	struct zynq_qspi *xqspi = spi_master_get_devdata(qspi->master);
 	u32 config_reg;
+	u32 lconfig_reg;
 	unsigned long flags;
 
 	spin_lock_irqsave(&xqspi->config_reg_lock, flags);
@@ -409,12 +411,17 @@ static void zynq_qspi_chipselect(struct spi_device *qspi, int is_on)
 
 	if (is_on) {
 		/* Select the slave */
-		config_reg &= ~ZYNQ_QSPI_CONFIG_SSCTRL_MASK;
-		config_reg |= (((~(0x0001 << qspi->chip_select)) << 10) &
-				ZYNQ_QSPI_CONFIG_SSCTRL_MASK);
+		lconfig_reg = zynq_qspi_read(xqspi->regs +
+			ZYNQ_QSPI_LINEAR_CFG_OFFSET);
+		if (qspi->chip_select)
+			lconfig_reg |= ZYNQ_QSPI_LCFG_U_PAGE_MASK;
+		zynq_qspi_write(xqspi->regs + ZYNQ_QSPI_LINEAR_CFG_OFFSET,
+			lconfig_reg);
+
+		config_reg &= ~ZYNQ_QSPI_CONFIG_PCS_MASK;
 	} else {
 		/* Deselect the slave */
-		config_reg |= ZYNQ_QSPI_CONFIG_SSCTRL_MASK;
+		config_reg |= ZYNQ_QSPI_CONFIG_PCS_MASK;
 	}
 
 	zynq_qspi_write(xqspi->regs + ZYNQ_QSPI_CONFIG_OFFSET, config_reg);
