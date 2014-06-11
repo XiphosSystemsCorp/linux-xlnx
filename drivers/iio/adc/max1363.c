@@ -41,6 +41,7 @@
 #include <linux/iio/trigger_consumer.h>
 #include <linux/iio/triggered_buffer.h>
 
+
 #define MAX1363_SETUP_BYTE(a) ((a) | 0x80)
 
 /* There is a fair bit more defined here than currently
@@ -1538,20 +1539,25 @@ static int max1363_probe(struct i2c_client *client,
 
 	indio_dev->dev.of_node = client->dev.of_node;
 	ret = iio_map_array_register(indio_dev, client->dev.platform_data);
-	if (ret < 0)
+	if (ret < 0) {
+		dev_err(&client->dev, "iio_map_array_register returns: %d\n",ret);
 		return ret;
+	}
 
 	st = iio_priv(indio_dev);
 
 	st->reg = devm_regulator_get(&client->dev, "vcc");
 	if (IS_ERR(st->reg)) {
 		ret = PTR_ERR(st->reg);
+  		dev_err(&client->dev,"devm_regulator_get vcc error: %d\n",IS_ERR(st->reg));
 		goto error_unregister_map;
 	}
 
 	ret = regulator_enable(st->reg);
-	if (ret)
+	if (ret) {
+		dev_err(&indio_dev->dev, "vcc regulator_enable returns: %d\n",ret);
 		goto error_unregister_map;
+	}
 
 	/* this is only used for device removal purposes */
 	i2c_set_clientdata(client, indio_dev);
@@ -1560,22 +1566,26 @@ static int max1363_probe(struct i2c_client *client,
 	st->client = client;
 
 	st->vref_uv = st->chip_info->int_vref_mv * 1000;
-	vref = devm_regulator_get(&client->dev, "vref");
+	vref = devm_regulator_get_optional(&client->dev, "vref");
 	if (!IS_ERR(vref)) {
 		int vref_uv;
 
 		ret = regulator_enable(vref);
-		if (ret)
+		if (ret) {
+			dev_err(&indio_dev->dev,"vref regulator_enable returns: %d\n",ret);
 			goto error_disable_reg;
+		}
 		st->vref = vref;
 		vref_uv = regulator_get_voltage(vref);
 		if (vref_uv <= 0) {
+    			dev_err(&indio_dev->dev, "vref_uv : %d\n",vref_uv);
 			ret = -EINVAL;
 			goto error_disable_reg;
 		}
 		st->vref_uv = vref_uv;
+	} else {
+  		dev_err(&indio_dev->dev, "devm_regulator_get vref error: %d\n",IS_ERR(vref));
 	}
-
 	if (i2c_check_functionality(client->adapter, I2C_FUNC_I2C)) {
 		st->send = i2c_master_send;
 		st->recv = i2c_master_recv;
@@ -1589,8 +1599,10 @@ static int max1363_probe(struct i2c_client *client,
 	}
 
 	ret = max1363_alloc_scan_masks(indio_dev);
-	if (ret)
+	if (ret) {
+		dev_err(&indio_dev->dev,"max1363_alloc_scan_masks returns: %d\n",ret);
 		goto error_disable_reg;
+	}
 
 	/* Establish that the iio_dev is a child of the i2c device */
 	indio_dev->dev.parent = &client->dev;
@@ -1600,13 +1612,17 @@ static int max1363_probe(struct i2c_client *client,
 	indio_dev->info = st->chip_info->info;
 	indio_dev->modes = INDIO_DIRECT_MODE;
 	ret = max1363_initial_setup(st);
-	if (ret < 0)
+	if (ret < 0) {
+		dev_err(&indio_dev->dev, "max1363_initial_setup returns: %d\n",ret);
 		goto error_disable_reg;
+	}
 
 	ret = iio_triggered_buffer_setup(indio_dev, NULL,
 		&max1363_trigger_handler, NULL);
-	if (ret)
+	if (ret) {
+  		dev_err(&indio_dev->dev, "iio_triggered_buffer_setup returns: %d\n",ret);
 		goto error_disable_reg;
+	}
 
 	if (client->irq) {
 		ret = devm_request_threaded_irq(&client->dev, st->client->irq,
@@ -1616,13 +1632,17 @@ static int max1363_probe(struct i2c_client *client,
 					   "max1363_event",
 					   indio_dev);
 
-		if (ret)
+		if (ret) {
+			dev_err(&indio_dev->dev,"devm_request_threaded_irq returns: %d\n",ret);
 			goto error_uninit_buffer;
+		}
 	}
 
 	ret = iio_device_register(indio_dev);
-	if (ret < 0)
+	if (ret < 0) {
+		dev_err(&indio_dev->dev,"iio_device_register returns: %d\n",ret);
 		goto error_uninit_buffer;
+	}
 
 	return 0;
 
