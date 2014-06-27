@@ -18,6 +18,7 @@
 #include <linux/slab.h>
 #include <linux/sysfs.h>
 #include <linux/module.h>
+#include <linux/of.h>
 
 #include <linux/iio/iio.h>
 #include <linux/iio/sysfs.h>
@@ -843,6 +844,10 @@ static int adis16480_probe(struct spi_device *spi)
 	if (indio_dev == NULL)
 		return -ENOMEM;
 
+	spi->mode = SPI_MODE_3;
+	spi->bits_per_word = 8;
+	spi_setup(spi);
+
 	spi_set_drvdata(spi, indio_dev);
 
 	st = iio_priv(indio_dev);
@@ -904,9 +909,17 @@ static const struct spi_device_id adis16480_ids[] = {
 };
 MODULE_DEVICE_TABLE(spi, adis16480_ids);
 
+static const struct of_device_id adis16480_of_match[] = {
+	{ .compatible = "analog,adis16480" },
+	{ .compatible = "analog,adis16485" },
+	{ }
+};
+MODULE_DEVICE_TABLE(of, adis16480_of_match);
+
 static struct spi_driver adis16480_driver = {
 	.driver = {
 		.name = "adis16480",
+		.of_match_table = of_match_ptr(adis16480_of_match),
 		.owner = THIS_MODULE,
 	},
 	.id_table = adis16480_ids,
