@@ -157,6 +157,12 @@ static int of_platform_serial_probe(struct platform_device *ofdev)
 	if (!match)
 		return -EINVAL;
 
+	port_type = (unsigned long)match->data;
+  if (port_type == PORT_UNKNOWN) {
+		dev_info(&ofdev->dev, "Unknown serial port found, ignored\n");
+		return -ENODEV;
+  }
+
 	if (of_find_property(ofdev->dev.of_node, "used-by-rtas", NULL))
 		return -EBUSY;
 
@@ -164,7 +170,7 @@ static int of_platform_serial_probe(struct platform_device *ofdev)
 	if (info == NULL)
 		return -ENOMEM;
 
-	port_type = (unsigned long)match->data;
+
 	ret = of_platform_serial_setup(ofdev, port_type, &port, info);
 	if (ret)
 		goto out;
