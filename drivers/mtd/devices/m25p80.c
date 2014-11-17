@@ -1166,6 +1166,18 @@ static int m25p80_is_locked(struct mtd_info *mtd, loff_t ofs, uint64_t len)
 	int res;
 
 	mutex_lock(&flash->lock);
+
+	if (flash->isparallel == 1)
+		offset /= 2;
+
+	if (flash->isstacked == 1) {
+		if (offset >= (flash->mtd.size / 2)) {
+			offset = offset - (flash->mtd.size / 2);
+			flash->spi->master->flags |= SPI_MASTER_U_PAGE;
+		} else {
+			flash->spi->master->flags &= ~SPI_MASTER_U_PAGE;
+		}
+	}
 	/* Wait until finished previous command */
 	if (wait_till_ready(flash)) {
 		mutex_unlock(&flash->lock);
