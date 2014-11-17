@@ -309,6 +309,16 @@ config MTD_SWAP
 	  The driver provides wear leveling by storing erase counter into the
 	  OOB.
 
+config MTD_ECC
+	tristate "ECC MTD Overlay"
+	depends on MTD
+	help
+	  Provides an extra layer of ECC protection for NOR flash that are typically
+	  not expected to be prone to single-bit errors. However, certain applications
+	  in radiation heavy environments (HADRON collider, Low-earth orbit) can 
+	  cause errors.
+	  This driver makes use of the kernel's BCH library.
+
 source "drivers/mtd/chips/Kconfig"
 
 source "drivers/mtd/maps/Kconfig"
