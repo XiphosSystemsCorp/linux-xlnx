@@ -311,6 +311,7 @@ config MTD_SWAP
 
 config MTD_ECC
 	tristate "ECC MTD Overlay"
+  select BCH
 	depends on MTD
 	help
 	  Provides an extra layer of ECC protection for NOR flash that are typically

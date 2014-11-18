@@ -160,6 +160,8 @@ static ssize_t mtd_type_show(struct device *dev,
 	case MTD_MLCNANDFLASH:
 		type = "mlc-nand";
 		break;
+	case MTD_ECCNORFLASH:
+		type = "ecc-nor";
 	default:
 		type = "unknown";
 	}
