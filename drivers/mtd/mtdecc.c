@@ -26,9 +26,11 @@ static struct mtd_info * mtd_ecc;
 
 //static const char * mtd_ecc_name = "MTD_ECC";
 
-static char * mtd_ecc_buf;
-
-static DEFINE_MUTEX(mtd_ecc_buf_mutex);
+#ifdef MTD_ECC_DEBUG
+#define DBG_MTDECC(...) DBG_MTDECC(__VA_ARGS__)
+#else
+#define DBG_MTDECC(...)
+#endif
 
 static int mtd_ecc_lock(struct mtd_info *mtd, loff_t ofs, uint64_t len)
 {
@@ -80,12 +82,13 @@ static int mtd_ecc_read(struct mtd_info *mtd, loff_t from, size_t len,
 	size_t whole_sect_length;
 	size_t read_remaining = len;
 	int rc,i;
+	char * mtd_ecc_buf;
 
   do_div(start_sect,3840LL);
   // NOTE: do_div returns remainder
   do_div(start_sect,0x10000LL);
 	start_offset = do_div(from_offset,0xf000);
-	dev_dbg(&mtd->dev,"read: from: 0x%llx, len: %d\n",from,len);
+	DBG_MTDECC(&mtd->dev,"read: from: 0x%llx, len: %d\n",from,len);
  	whole_sect_length = len + start_offset;
 	under_sects = (whole_sect_length / 61440) + ((whole_sect_length % 61440) > 0);
 
@@ -95,7 +98,7 @@ static int mtd_ecc_read(struct mtd_info *mtd, loff_t from, size_t len,
 		return -EINVAL;
 	}
 #endif
-	mutex_lock(&mtd_ecc_buf_mutex);
+	mtd_ecc_buf = kmalloc(0x10000,GFP_KERNEL);
 	for (i=0;i<under_sects;i++) {
 		size_t buf_out_index = 0;
 		size_t buf_in_index = 0;
@@ -104,17 +107,17 @@ static int mtd_ecc_read(struct mtd_info *mtd, loff_t from, size_t len,
 		size_t under_retlen = 0;
 
 		under_from = (start_sect + i) * 0x10000;
-		dev_dbg(&mtd->dev,"under->_read : from: %llx\n",under_from);
+		DBG_MTDECC(&mtd->dev,"under->_read : from: %llx\n",under_from);
 		if ((rc = mtd_under->_read(mtd_under,under_from,0x10000,&under_retlen,mtd_ecc_buf))<0) {
 			dev_err(&mtd->dev,"Problem reading %d bytes from 0x%08llx\n",0x10000,under_from);
-			mutex_unlock(&mtd_ecc_buf_mutex);
+			kfree(mtd_ecc_buf);
 			return rc;
 		}
-		dev_dbg(&mtd->dev,"under->_read rc: %d retlen: %d\n",rc,under_retlen);
+		DBG_MTDECC(&mtd->dev,"under->_read rc: %d retlen: %d\n",rc,under_retlen);
 
 		if (under_retlen != 0x10000 ) {
 			dev_err(&mtd->dev,"Under read. %d instead of %d\n",under_retlen,0x10000);
-			mutex_unlock(&mtd_ecc_buf_mutex);
+			kfree(mtd_ecc_buf);
 			return -EINVAL;
 		}
 #if 0
@@ -136,13 +139,13 @@ static int mtd_ecc_read(struct mtd_info *mtd, loff_t from, size_t len,
 			buf_cpy_len = read_remaining;
 		}
 		read_remaining -= buf_cpy_len;
-		dev_dbg(&mtd->dev,"memcpy %d bytes: 0x%08x -> 0x%08x\n",buf_cpy_len,buf_in_index,buf_out_index);
+		DBG_MTDECC(&mtd->dev,"memcpy %d bytes: 0x%08x -> 0x%08x\n",buf_cpy_len,buf_in_index,buf_out_index);
 		// get the data from the requested offset in the buffer
 		memcpy(&buf[buf_out_index],&mtd_ecc_buf[buf_in_index],buf_cpy_len);
 
 		*retlen += buf_cpy_len;
 	}
-	mutex_unlock(&mtd_ecc_buf_mutex);
+	kfree(mtd_ecc_buf);
 
 	return 0;
 }
@@ -167,16 +170,17 @@ static int mtd_ecc_write(struct mtd_info *mtd, loff_t to, size_t len,
 	size_t whole_sect_length;
 	size_t write_remaining = len;
 	int rc,i;
+	char * mtd_ecc_buf;
 
   do_div(start_sect,3840LL);
   // NOTE: do_div returns remainder
 	do_div(start_sect,0x10000LL);
 	start_offset = do_div(to_offset,0xf000);
-	dev_dbg(&mtd->dev,"write : to : 0x%llx, len: %d\n",to,len);
+	DBG_MTDECC(&mtd->dev,"write : to : 0x%llx, len: %d\n",to,len);
  	whole_sect_length = len + start_offset;
 	under_sects = (whole_sect_length / 61440) + ((whole_sect_length % 61440) > 0);
 
-	mutex_lock(&mtd_ecc_buf_mutex);
+	mtd_ecc_buf = kmalloc(0x10000,GFP_KERNEL);
 	for (i=0;i<under_sects;i++) {
 		size_t buf_out_index = 0;
 		size_t buf_in_index = 0;
@@ -206,29 +210,29 @@ static int mtd_ecc_write(struct mtd_info *mtd, loff_t to, size_t len,
 			// We have to read the sector so we can calculate the BCH
 			if ((rc = mtd_under->_read(mtd_under,under_to,0x10000,&under_retlen,mtd_ecc_buf))<0) {
 				dev_err(&mtd->dev,"Problem reading %d bytes from 0x%08llx\n",0x10000,under_to);
-				mutex_unlock(&mtd_ecc_buf_mutex);
+				kfree(mtd_ecc_buf);
 				return rc;
 			}
-			dev_dbg(&mtd->dev,"under->_read rc: %d retlen: %d\n",rc,under_retlen);
+			DBG_MTDECC(&mtd->dev,"under->_read rc: %d retlen: %d\n",rc,under_retlen);
 		}
 
 		// get the data from the requested offset in the buffer
 		memcpy(&mtd_ecc_buf[buf_out_index],&buf[buf_in_index],buf_cpy_len);
 
-		dev_dbg(&mtd->dev,"under->_write: to 0x%llx\n",under_to);
+		DBG_MTDECC(&mtd->dev,"under->_write: to 0x%llx\n",under_to);
 		if ((rc = mtd_under->_write(mtd_under,under_to,0x10000,&under_retlen,mtd_ecc_buf))<0) {
 			dev_err(&mtd->dev,"Problem writing %d bytes to 0x%08llx\n",0x10000,under_to);
-			mutex_unlock(&mtd_ecc_buf_mutex);
+			kfree(mtd_ecc_buf);
 			return rc;
 		}
 		if (under_retlen != 0x10000 ) {
 			dev_err(&mtd->dev,"Under write. %d instead of %d\n",under_retlen,0x10000);
-			mutex_unlock(&mtd_ecc_buf_mutex);
+			kfree(mtd_ecc_buf);
 			return -EINVAL;
 		}
 		*retlen += buf_cpy_len;
 	}
-	mutex_unlock(&mtd_ecc_buf_mutex);
+	kfree(mtd_ecc_buf);
 	
 	return 0;
 }
@@ -259,38 +263,38 @@ static int mtd_ecc_erase(struct mtd_info *mtd, struct erase_info *instr)
 		under_erase.len = current_instr->len * 4096ULL;
 		do_div(under_erase.len,3840ULL);
 
-		dev_dbg(&mtd->dev,"Erase request: 0x%llx bytes from 0x%llx\n",current_instr->len, current_instr->addr);
-		dev_dbg(&mtd->dev,"Translated to: 0x%llx bytes from 0x%llx\n",under_erase.len, under_erase.addr);
+		DBG_MTDECC(&mtd->dev,"Erase request: 0x%llx bytes from 0x%llx\n",current_instr->len, current_instr->addr);
+		DBG_MTDECC(&mtd->dev,"Translated to: 0x%llx bytes from 0x%llx\n",under_erase.len, under_erase.addr);
 
-		dev_dbg(&mtd->dev,"EI.fail_addr: 0x%llx\n",current_instr->fail_addr);
-		dev_dbg(&mtd->dev,"EI.time: 0x%x\n",(unsigned int)current_instr->time);
-		dev_dbg(&mtd->dev,"EI.retries: 0x%x\n",(unsigned int)current_instr->retries);
-		dev_dbg(&mtd->dev,"EI.dev: 0x%x\n",current_instr->dev);
-		dev_dbg(&mtd->dev,"EI.cell: 0x%x\n",current_instr->cell);
-		dev_dbg(&mtd->dev,"EI.callback: 0x%p\n",current_instr->callback);
+		DBG_MTDECC(&mtd->dev,"EI.fail_addr: 0x%llx\n",current_instr->fail_addr);
+		DBG_MTDECC(&mtd->dev,"EI.time: 0x%x\n",(unsigned int)current_instr->time);
+		DBG_MTDECC(&mtd->dev,"EI.retries: 0x%x\n",(unsigned int)current_instr->retries);
+		DBG_MTDECC(&mtd->dev,"EI.dev: 0x%x\n",current_instr->dev);
+		DBG_MTDECC(&mtd->dev,"EI.cell: 0x%x\n",current_instr->cell);
+		DBG_MTDECC(&mtd->dev,"EI.callback: 0x%p\n",current_instr->callback);
 		// clear the callback so we can execute it correctly
 		under_erase.callback = NULL;
-		dev_dbg(&mtd->dev,"EI.priv: 0x%x\n",(unsigned int)current_instr->priv);
-		dev_dbg(&mtd->dev,"EI.state: 0x%x\n",current_instr->state);
-		dev_dbg(&mtd->dev,"EI.next: 0x%p\n",current_instr->next);
+		DBG_MTDECC(&mtd->dev,"EI.priv: 0x%x\n",(unsigned int)current_instr->priv);
+		DBG_MTDECC(&mtd->dev,"EI.state: 0x%x\n",current_instr->state);
+		DBG_MTDECC(&mtd->dev,"EI.next: 0x%p\n",current_instr->next);
 		under_erase.next = NULL;
 
 		if ((rc = mtd_under->_erase(mtd_under,&under_erase))<0){
 			dev_err(&mtd->dev,"Error erasing.\n");
 			break;
 		}
-		dev_dbg(&mtd->dev,"under->_erase returned %d\n",rc);
-		dev_dbg(&mtd->dev,"EI.fail_addr: 0x%llx\n",under_erase.fail_addr);
-		dev_dbg(&mtd->dev,"EI.time: 0x%x\n",(unsigned int)under_erase.time);
-		dev_dbg(&mtd->dev,"EI.retries: 0x%x\n",(unsigned int)under_erase.retries);
-		dev_dbg(&mtd->dev,"EI.dev: 0x%x\n",under_erase.dev);
-		dev_dbg(&mtd->dev,"EI.cell: 0x%x\n",under_erase.cell);
-		dev_dbg(&mtd->dev,"EI.callback: 0x%p\n",under_erase.callback);
+		DBG_MTDECC(&mtd->dev,"under->_erase returned %d\n",rc);
+		DBG_MTDECC(&mtd->dev,"EI.fail_addr: 0x%llx\n",under_erase.fail_addr);
+		DBG_MTDECC(&mtd->dev,"EI.time: 0x%x\n",(unsigned int)under_erase.time);
+		DBG_MTDECC(&mtd->dev,"EI.retries: 0x%x\n",(unsigned int)under_erase.retries);
+		DBG_MTDECC(&mtd->dev,"EI.dev: 0x%x\n",under_erase.dev);
+		DBG_MTDECC(&mtd->dev,"EI.cell: 0x%x\n",under_erase.cell);
+		DBG_MTDECC(&mtd->dev,"EI.callback: 0x%p\n",under_erase.callback);
 		// clear the callback so we can execute it correctly
 		under_erase.callback = NULL;
-		dev_dbg(&mtd->dev,"EI.priv: 0x%x\n",(unsigned int)under_erase.priv);
-		dev_dbg(&mtd->dev,"EI.state: 0x%x\n",under_erase.state);
-		dev_dbg(&mtd->dev,"EI.next: 0x%p\n",under_erase.next);
+		DBG_MTDECC(&mtd->dev,"EI.priv: 0x%x\n",(unsigned int)under_erase.priv);
+		DBG_MTDECC(&mtd->dev,"EI.state: 0x%x\n",under_erase.state);
+		DBG_MTDECC(&mtd->dev,"EI.next: 0x%p\n",under_erase.next);
 			// copy in the state
 		current_instr->state = under_erase.state;
 		mtd_erase_callback(current_instr);
@@ -310,7 +314,7 @@ static int mtd_ecc_erase(struct mtd_info *mtd, struct erase_info *instr)
  */
 static int mtd_ecc_get_device(struct mtd_info *mtd)
 {
-	dev_dbg(&mtd->dev,"get_device: %p\n",mtd_under->_get_device);
+	DBG_MTDECC(&mtd->dev,"get_device: %p\n",mtd_under->_get_device);
 	return(mtd_under->_get_device(mtd_under));
 }
 	
@@ -344,13 +348,6 @@ static int __init mtdecc_init(void)
 	if (!mtd) {
 		err = -ENOMEM; 
 		goto init_return_mtd_under;
-	}
-
-	// TODO: get the length from somewhere else... and it should be 0x1000
-	mtd_ecc_buf = kzalloc(0x10000,GFP_KERNEL);
-	if (!mtd_ecc_buf) {
-		err = -ENOMEM;
-		goto init_free_mtd_ecc;
 	}
 
 	mtd->name = "MTD ECC";
@@ -400,18 +397,12 @@ static int __init mtdecc_init(void)
 	if (mtd_device_register(mtd,NULL,0)) {
 		printk(KERN_ERR "Cannot add MTD device");
 		err = -ENFILE;
-		goto init_free_mtd_ecc_buf;
+		goto init_free_mtd_ecc;
 	}
 
 	mtd_ecc = mtd;
 
 	return 0;
-/*
-init_free_mtd_ecc_name:
-	kfree(mtd_ecc->name);
-*/
-init_free_mtd_ecc_buf:
-	kfree(mtd_ecc_buf);
 
 init_free_mtd_ecc:
 	kfree(mtd);
