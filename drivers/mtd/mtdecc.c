@@ -28,6 +28,8 @@ static struct mtd_info * mtd_ecc;
 
 static char * mtd_ecc_buf;
 
+static DEFINE_MUTEX(mtd_ecc_buf_mutex);
+
 static int mtd_ecc_lock(struct mtd_info *mtd, loff_t ofs, uint64_t len)
 {
 	// calculate the number of blocks
@@ -93,6 +95,7 @@ static int mtd_ecc_read(struct mtd_info *mtd, loff_t from, size_t len,
 		return -EINVAL;
 	}
 #endif
+	mutex_lock(&mtd_ecc_buf_mutex);
 	for (i=0;i<under_sects;i++) {
 		size_t buf_out_index = 0;
 		size_t buf_in_index = 0;
@@ -104,12 +107,14 @@ static int mtd_ecc_read(struct mtd_info *mtd, loff_t from, size_t len,
 		dev_dbg(&mtd->dev,"under->_read : from: %llx\n",under_from);
 		if ((rc = mtd_under->_read(mtd_under,under_from,0x10000,&under_retlen,mtd_ecc_buf))<0) {
 			dev_err(&mtd->dev,"Problem reading %d bytes from 0x%08llx\n",0x10000,under_from);
+			mutex_unlock(&mtd_ecc_buf_mutex);
 			return rc;
 		}
 		dev_dbg(&mtd->dev,"under->_read rc: %d retlen: %d\n",rc,under_retlen);
 
 		if (under_retlen != 0x10000 ) {
 			dev_err(&mtd->dev,"Under read. %d instead of %d\n",under_retlen,0x10000);
+			mutex_unlock(&mtd_ecc_buf_mutex);
 			return -EINVAL;
 		}
 #if 0
@@ -137,6 +142,7 @@ static int mtd_ecc_read(struct mtd_info *mtd, loff_t from, size_t len,
 
 		*retlen += buf_cpy_len;
 	}
+	mutex_unlock(&mtd_ecc_buf_mutex);
 
 	return 0;
 }
@@ -169,8 +175,8 @@ static int mtd_ecc_write(struct mtd_info *mtd, loff_t to, size_t len,
 	dev_dbg(&mtd->dev,"write : to : 0x%llx, len: %d\n",to,len);
  	whole_sect_length = len + start_offset;
 	under_sects = (whole_sect_length / 61440) + ((whole_sect_length % 61440) > 0);
-	// TODO: add lock around mtd_ecc_buf
 
+	mutex_lock(&mtd_ecc_buf_mutex);
 	for (i=0;i<under_sects;i++) {
 		size_t buf_out_index = 0;
 		size_t buf_in_index = 0;
@@ -200,6 +206,7 @@ static int mtd_ecc_write(struct mtd_info *mtd, loff_t to, size_t len,
 			// We have to read the sector so we can calculate the BCH
 			if ((rc = mtd_under->_read(mtd_under,under_to,0x10000,&under_retlen,mtd_ecc_buf))<0) {
 				dev_err(&mtd->dev,"Problem reading %d bytes from 0x%08llx\n",0x10000,under_to);
+				mutex_unlock(&mtd_ecc_buf_mutex);
 				return rc;
 			}
 			dev_dbg(&mtd->dev,"under->_read rc: %d retlen: %d\n",rc,under_retlen);
@@ -211,14 +218,17 @@ static int mtd_ecc_write(struct mtd_info *mtd, loff_t to, size_t len,
 		dev_dbg(&mtd->dev,"under->_write: to 0x%llx\n",under_to);
 		if ((rc = mtd_under->_write(mtd_under,under_to,0x10000,&under_retlen,mtd_ecc_buf))<0) {
 			dev_err(&mtd->dev,"Problem writing %d bytes to 0x%08llx\n",0x10000,under_to);
+			mutex_unlock(&mtd_ecc_buf_mutex);
 			return rc;
 		}
 		if (under_retlen != 0x10000 ) {
 			dev_err(&mtd->dev,"Under write. %d instead of %d\n",under_retlen,0x10000);
+			mutex_unlock(&mtd_ecc_buf_mutex);
 			return -EINVAL;
 		}
 		*retlen += buf_cpy_len;
 	}
+	mutex_unlock(&mtd_ecc_buf_mutex);
 	
 	return 0;
 }
