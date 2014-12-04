@@ -31,6 +31,22 @@ static unsigned char * mtd_ecc_eccmask;
 
 static unsigned int * mtd_ecc_errloc;
 
+/*
+static unsigned int mtd_ecc_sect_psize = 4096;
+static unsigned int mtd_ecc_sect_dsize = 3840;
+static unsigned int mtd_ecc_sect_esize = 256;
+*/
+
+
+#define MTD_ECC_PSIZE (4096)
+#define MTD_ECC_DSIZE (3840)
+#define MTD_ECC_PSIZEULL (4096ULL)
+#define MTD_ECC_PSIZELL (4096LL)
+#define MTD_ECC_DSIZEULL (3840ULL)
+#define MTD_ECC_DSIZELL (3840LL)
+#define MTD_ECC_ESIZE (256)
+
+
 //static const char * mtd_ecc_name = "MTD_ECC";
 
 #ifdef MTD_ECC_DEBUG
@@ -39,33 +55,39 @@ static unsigned int * mtd_ecc_errloc;
 #define DBG_MTDECC(...)
 #endif
 
+static inline uint64_t mtd_ecc_calc_lock_off(loff_t ofs, uint64_t len, loff_t * lock_ofs) {
+	
+	uint64_t lock_len = (len * MTD_ECC_PSIZEULL);
+	*lock_ofs = (ofs * MTD_ECC_PSIZELL);
+  do_div(lock_len,MTD_ECC_DSIZEULL);
+  do_div(*lock_ofs,MTD_ECC_DSIZEULL);
+	return lock_len;
+}
+
 static int mtd_ecc_lock(struct mtd_info *mtd, loff_t ofs, uint64_t len)
 {
 	// calculate the number of blocks
-	uint64_t lock_len = (len * 4096ULL);
-	loff_t lock_ofs = (ofs * 4096LL);
-  do_div(lock_len,3840ULL);
-  do_div(lock_ofs,3840ULL);
+	uint64_t lock_len;
+	loff_t lock_ofs;
+	lock_len = mtd_ecc_calc_lock_off(ofs,len,&lock_ofs);
 	return(mtd_under->_lock(mtd_under,lock_ofs,lock_len));
 }
 
 static int mtd_ecc_unlock(struct mtd_info *mtd, loff_t ofs, uint64_t len)
 {
 	// calculate the number of blocks
-	uint64_t lock_len = (len * 4096ULL);
-	loff_t lock_ofs = (ofs * 4096LL);
-  do_div(lock_len,3840ULL);
-  do_div(lock_ofs,3840ULL);
+	uint64_t lock_len;
+	loff_t lock_ofs;
+	lock_len = mtd_ecc_calc_lock_off(ofs,len,&lock_ofs);
 	return(mtd_under->_unlock(mtd_under,lock_ofs,lock_len));
 }
 
 static int mtd_ecc_is_locked(struct mtd_info *mtd, loff_t ofs, uint64_t len)
 {
 	// calculate the number of blocks
-	uint64_t lock_len = (len * 4096ULL);
-	loff_t lock_ofs = (ofs * 4096LL);
-  do_div(lock_len,3840ULL);
-  do_div(lock_ofs,3840ULL);
+	uint64_t lock_len;
+	loff_t lock_ofs;
+	lock_len = mtd_ecc_calc_lock_off(ofs,len,&lock_ofs);
 	return(mtd_under->_is_locked(mtd_under,lock_ofs,lock_len));
 }
 /**
@@ -82,7 +104,7 @@ static int mtd_ecc_is_locked(struct mtd_info *mtd, loff_t ofs, uint64_t len)
 static int mtd_ecc_read(struct mtd_info *mtd, loff_t from, size_t len,
 		       size_t *retlen, unsigned char *buf)
 {
-	loff_t start_sect = from * 4096LL;
+	loff_t start_sect;
 	loff_t from_offset = from;
 	size_t start_offset;
 	size_t under_sects;
@@ -90,14 +112,15 @@ static int mtd_ecc_read(struct mtd_info *mtd, loff_t from, size_t len,
 	size_t read_remaining = len;
 	int rc,i;
 	char * mtd_ecc_buf;
-
-  do_div(start_sect,3840LL);
+	
+ 	start_sect = from * MTD_ECC_PSIZELL;
+  do_div(start_sect,MTD_ECC_DSIZELL);
   // NOTE: do_div returns remainder
-  do_div(start_sect,0x10000LL);
-	start_offset = do_div(from_offset,0xf000);
+  do_div(start_sect,MTD_ECC_PSIZEULL);
+	start_offset = do_div(from_offset,MTD_ECC_DSIZEULL);
 	DBG_MTDECC(&mtd->dev,"read: from: 0x%llx, len: %d\n",from,len);
  	whole_sect_length = len + start_offset;
-	under_sects = (whole_sect_length / 61440) + ((whole_sect_length % 61440) > 0);
+	under_sects = (whole_sect_length / MTD_ECC_DSIZE) + ((whole_sect_length % MTD_ECC_DSIZE) > 0);
 
 #if 0
 	if (len > 61440) {
@@ -105,41 +128,40 @@ static int mtd_ecc_read(struct mtd_info *mtd, loff_t from, size_t len,
 		return -EINVAL;
 	}
 #endif
-	mtd_ecc_buf = kmalloc(0x10000,GFP_KERNEL);
+	mtd_ecc_buf = kmalloc(MTD_ECC_PSIZE,GFP_KERNEL);
 	for (i=0;i<under_sects;i++) {
 		size_t buf_out_index = 0;
 		size_t buf_in_index = 0;
 		size_t buf_cpy_len = 0;
 		loff_t under_from;
 		size_t under_retlen = 0;
-    int j = 0;
 
-		under_from = (start_sect + i) * 0x10000;
+		under_from = (start_sect + i) * MTD_ECC_PSIZE;
 		DBG_MTDECC(&mtd->dev,"under->_read : from: %llx\n",under_from);
-		if ((rc = mtd_under->_read(mtd_under,under_from,0x10000,&under_retlen,mtd_ecc_buf))<0) {
-			dev_err(&mtd->dev,"Problem reading %d bytes from 0x%08llx\n",0x10000,under_from);
+		if ((rc = mtd_under->_read(mtd_under,under_from,MTD_ECC_PSIZE,&under_retlen,mtd_ecc_buf))<0) {
+			dev_err(&mtd->dev,"Problem reading %d bytes from 0x%08llx\n",MTD_ECC_PSIZE,under_from);
 			kfree(mtd_ecc_buf);
 			return rc;
 		}
 		DBG_MTDECC(&mtd->dev,"under->_read rc: %d retlen: %d\n",rc,under_retlen);
 
-		if (under_retlen != 0x10000 ) {
-			dev_err(&mtd->dev,"Under read. %d instead of %d\n",under_retlen,0x10000);
+		if (under_retlen != MTD_ECC_PSIZE) {
+			dev_err(&mtd->dev,"Under read. %d instead of %d\n",under_retlen,MTD_ECC_PSIZE);
 			kfree(mtd_ecc_buf);
 			return -EINVAL;
 		}
 
 		// correct data
-		for (j=0;j<16;j++) {
+		{
 			int count;
-			unsigned char * read_ecc = &mtd_ecc_buf[0xf000 + (j*0x100)];
-      unsigned char * page = &mtd_ecc_buf[j * 0xf00];
-      int k;
+			unsigned char * read_ecc = &mtd_ecc_buf[MTD_ECC_DSIZE];
+			unsigned char * page = mtd_ecc_buf;
+			int k;
 			
-      unsigned char calc_ecc[0x100];
+      unsigned char calc_ecc[MTD_ECC_ESIZE];
 
       memset(calc_ecc,0,sizeof(calc_ecc));
-      encode_bch(mtd_ecc_bch,page,0xf00,calc_ecc);
+      encode_bch(mtd_ecc_bch,page,MTD_ECC_DSIZE,calc_ecc);
 
 
       /* apply mask so that an erased page is a valid codeword */
@@ -147,11 +169,11 @@ static int mtd_ecc_read(struct mtd_info *mtd, loff_t from, size_t len,
         calc_ecc[k] ^= mtd_ecc_eccmask[k];
       }
 
-			count = decode_bch(mtd_ecc_bch,page,0xf00,read_ecc,calc_ecc,NULL,mtd_ecc_errloc); 
+			count = decode_bch(mtd_ecc_bch,page,MTD_ECC_DSIZE,read_ecc,calc_ecc,NULL,mtd_ecc_errloc); 
 
       if (count > 0) {
         for (k=0;k<count;k++) {
-          if (mtd_ecc_errloc[k] < (0xf00*8) ) {
+          if (mtd_ecc_errloc[k] < (MTD_ECC_DSIZE*8) ) {
             // error is in data, correct it
             page[mtd_ecc_errloc[k] >> 3] ^= (1 << (mtd_ecc_errloc[k] & 7));
           }
@@ -164,14 +186,14 @@ static int mtd_ecc_read(struct mtd_info *mtd, loff_t from, size_t len,
 		}
 
 
-		buf_out_index = i * 0xf000;
+		buf_out_index = i * MTD_ECC_DSIZE;
 		if (i == 0) {
 			buf_in_index = start_offset;
 		} else {
 			buf_in_index = 0;
 		}
-		if (read_remaining > 0xf000) {
-			buf_cpy_len = 0xf000 - buf_in_index;
+		if (read_remaining > MTD_ECC_DSIZE) {
+			buf_cpy_len = MTD_ECC_DSIZE - buf_in_index;
 		} else {
 			buf_cpy_len = read_remaining;
 		}
@@ -200,7 +222,7 @@ static int mtd_ecc_read(struct mtd_info *mtd, loff_t from, size_t len,
 static int mtd_ecc_write(struct mtd_info *mtd, loff_t to, size_t len,
 			size_t *retlen, const u_char *buf)
 {
-	loff_t start_sect = to * 4096LL;
+	loff_t start_sect;
 	loff_t to_offset = to;
 	size_t start_offset;
 	size_t under_sects;
@@ -209,7 +231,8 @@ static int mtd_ecc_write(struct mtd_info *mtd, loff_t to, size_t len,
 	int rc,i;
 	char * mtd_ecc_buf;
 
-  do_div(start_sect,3840LL);
+	start_sect = to * 4096LL;
+	do_div(start_sect,3840LL);
   // NOTE: do_div returns remainder
 	do_div(start_sect,0x10000LL);
 	start_offset = do_div(to_offset,0xf000);
