@@ -21,22 +21,22 @@
 #include <linux/mtd/mtd.h>
 #include <linux/bch.h>
 
-static struct mtd_info * mtd_under;
 
-static struct mtd_info * mtd_ecc;
+struct mtd_ecc_info {
 
-static struct bch_control * mtd_ecc_bch;
+	/* MTD device provided by instance */
+	struct mtd_info * mtd_ecc;
 
-static unsigned char * mtd_ecc_eccmask;
+	/* MTD device over which the MTD ECC is attached */
+	struct mtd_info * mtd_under;
 
-static unsigned int * mtd_ecc_errloc;
+	/* BCH structures */
+	// TODO: Add mutex
+	struct bch_control * bch;
+	unsigned char * eccmask;
+	unsigned int * errloc;
 
-/*
-static unsigned int mtd_ecc_sect_psize = 4096;
-static unsigned int mtd_ecc_sect_dsize = 3840;
-static unsigned int mtd_ecc_sect_esize = 256;
-*/
-
+	/* MTD ECC sector sizes */
 
 #define MTD_ECC_PSIZE (4096)
 #define MTD_ECC_DSIZE (3840)
@@ -46,6 +46,34 @@ static unsigned int mtd_ecc_sect_esize = 256;
 #define MTD_ECC_DSIZELL (3840LL)
 #define MTD_ECC_ESIZE (256)
 
+	unsigned int sect_psize;
+	unsigned int sect_dsize;
+	unsigned int sect_esize;
+
+	loff_t under_ofs;
+	uint64_t under_len;
+	size_t under_sects;
+	
+	
+	
+
+	char * rd_ecc_buf;
+	char * wr_ecc_buf;
+
+  struct list_head list;
+
+};
+
+struct list_head me_list;
+LIST_HEAD(me_list);
+
+
+struct mtd_ecc_under_req {
+	loff_t start_sect;
+	size_t under_sects;
+	size_t whole_sect_length;
+	size_t start_offset;
+};
 
 //static const char * mtd_ecc_name = "MTD_ECC";
 
@@ -55,41 +83,52 @@ static unsigned int mtd_ecc_sect_esize = 256;
 #define DBG_MTDECC(...)
 #endif
 
-static inline uint64_t mtd_ecc_calc_lock_off(loff_t ofs, uint64_t len, loff_t * lock_ofs) {
+static inline void mtd_ecc_calc_lock_off(struct mtd_ecc_info * me, loff_t ofs, uint64_t len) {
 	
-	uint64_t lock_len = (len * MTD_ECC_PSIZEULL);
-	*lock_ofs = (ofs * MTD_ECC_PSIZELL);
-  do_div(lock_len,MTD_ECC_DSIZEULL);
-  do_div(*lock_ofs,MTD_ECC_DSIZEULL);
-	return lock_len;
+	me->under_len = (len * MTD_ECC_PSIZEULL);
+  do_div(me->under_len,MTD_ECC_DSIZEULL);
+	me->under_ofs = (ofs * MTD_ECC_PSIZELL);
+  do_div(me->under_ofs,MTD_ECC_DSIZEULL);
 }
 
 static int mtd_ecc_lock(struct mtd_info *mtd, loff_t ofs, uint64_t len)
 {
-	// calculate the number of blocks
-	uint64_t lock_len;
-	loff_t lock_ofs;
-	lock_len = mtd_ecc_calc_lock_off(ofs,len,&lock_ofs);
-	return(mtd_under->_lock(mtd_under,lock_ofs,lock_len));
+	struct mtd_ecc_info * me = (struct mtd_ecc_info *)mtd->priv;
+	mtd_ecc_calc_lock_off(me,ofs,len);
+	return(me->mtd_under->_lock(me->mtd_under,me->under_ofs,me->under_len));
 }
 
 static int mtd_ecc_unlock(struct mtd_info *mtd, loff_t ofs, uint64_t len)
 {
-	// calculate the number of blocks
-	uint64_t lock_len;
-	loff_t lock_ofs;
-	lock_len = mtd_ecc_calc_lock_off(ofs,len,&lock_ofs);
-	return(mtd_under->_unlock(mtd_under,lock_ofs,lock_len));
+	struct mtd_ecc_info * me = (struct mtd_ecc_info *)mtd->priv;
+	mtd_ecc_calc_lock_off(me,ofs,len);
+	return(me->mtd_under->_unlock(me->mtd_under,me->under_ofs,me->under_len));
 }
 
 static int mtd_ecc_is_locked(struct mtd_info *mtd, loff_t ofs, uint64_t len)
 {
-	// calculate the number of blocks
-	uint64_t lock_len;
-	loff_t lock_ofs;
-	lock_len = mtd_ecc_calc_lock_off(ofs,len,&lock_ofs);
-	return(mtd_under->_is_locked(mtd_under,lock_ofs,lock_len));
+	struct mtd_ecc_info * me = (struct mtd_ecc_info *)mtd->priv;
+	mtd_ecc_calc_lock_off(me,ofs,len);
+	return(me->mtd_under->_is_locked(me->mtd_under,me->under_ofs,me->under_len));
 }
+
+static inline void mtd_ecc_calc_under_sect(struct mtd_ecc_info * me, struct mtd_ecc_under_req * mureq, loff_t ofs,size_t len) {
+	loff_t offset = ofs;
+	size_t whole_sect_length;
+
+	// Calculate the physical start byte to be read from mtd_under
+	// start_sect = (ofs * psize)/dsize
+ 	mureq->start_sect = ofs * MTD_ECC_PSIZELL;
+  do_div(mureq->start_sect,MTD_ECC_DSIZELL);
+	// Turn the start_byte into a sector
+  do_div(mureq->start_sect,MTD_ECC_PSIZEULL);
+	// Calculate the offset within the first physical sector
+	mureq->start_offset = do_div(offset,MTD_ECC_DSIZEULL);
+ 	whole_sect_length = len + mureq->start_offset;
+	mureq->under_sects = (whole_sect_length / MTD_ECC_DSIZE) + ((whole_sect_length % MTD_ECC_DSIZE) > 0);
+
+}
+
 /**
  * mtd_ecc_read - read operation of ECC encapsulated MTD devices.
  * @mtd: MTD device description object
@@ -104,23 +143,13 @@ static int mtd_ecc_is_locked(struct mtd_info *mtd, loff_t ofs, uint64_t len)
 static int mtd_ecc_read(struct mtd_info *mtd, loff_t from, size_t len,
 		       size_t *retlen, unsigned char *buf)
 {
-	loff_t start_sect;
-	loff_t from_offset = from;
-	size_t start_offset;
-	size_t under_sects;
-	size_t whole_sect_length;
 	size_t read_remaining = len;
 	int rc,i;
-	char * mtd_ecc_buf;
+	struct mtd_ecc_under_req mureq;
+	struct mtd_ecc_info * me = (struct mtd_ecc_info *)mtd->priv;
+
+	mtd_ecc_calc_under_sect(me,&mureq,from,len);
 	
- 	start_sect = from * MTD_ECC_PSIZELL;
-  do_div(start_sect,MTD_ECC_DSIZELL);
-  // NOTE: do_div returns remainder
-  do_div(start_sect,MTD_ECC_PSIZEULL);
-	start_offset = do_div(from_offset,MTD_ECC_DSIZEULL);
-	DBG_MTDECC(&mtd->dev,"read: from: 0x%llx, len: %d\n",from,len);
- 	whole_sect_length = len + start_offset;
-	under_sects = (whole_sect_length / MTD_ECC_DSIZE) + ((whole_sect_length % MTD_ECC_DSIZE) > 0);
 
 #if 0
 	if (len > 61440) {
@@ -128,67 +157,64 @@ static int mtd_ecc_read(struct mtd_info *mtd, loff_t from, size_t len,
 		return -EINVAL;
 	}
 #endif
-	mtd_ecc_buf = kmalloc(MTD_ECC_PSIZE,GFP_KERNEL);
-	for (i=0;i<under_sects;i++) {
+  /* TODO: To increase performance, the reads from the lower device should be
+ * as large as possible and then perform the ECC.
+ * In an ideal world we would somehow schedule the underlying read to happen
+ * while performing the ECC calcs in the 'foreground' */
+	for (i=0;i<mureq.under_sects;i++) {
 		size_t buf_out_index = 0;
 		size_t buf_in_index = 0;
 		size_t buf_cpy_len = 0;
 		loff_t under_from;
 		size_t under_retlen = 0;
 
-		under_from = (start_sect + i) * MTD_ECC_PSIZE;
+		under_from = (mureq.start_sect + i) * MTD_ECC_PSIZE;
 		DBG_MTDECC(&mtd->dev,"under->_read : from: %llx\n",under_from);
-		if ((rc = mtd_under->_read(mtd_under,under_from,MTD_ECC_PSIZE,&under_retlen,mtd_ecc_buf))<0) {
+		if ((rc = me->mtd_under->_read(me->mtd_under,under_from,MTD_ECC_PSIZE,&under_retlen,me->rd_ecc_buf))<0) {
 			dev_err(&mtd->dev,"Problem reading %d bytes from 0x%08llx\n",MTD_ECC_PSIZE,under_from);
-			kfree(mtd_ecc_buf);
 			return rc;
 		}
 		DBG_MTDECC(&mtd->dev,"under->_read rc: %d retlen: %d\n",rc,under_retlen);
 
 		if (under_retlen != MTD_ECC_PSIZE) {
 			dev_err(&mtd->dev,"Under read. %d instead of %d\n",under_retlen,MTD_ECC_PSIZE);
-			kfree(mtd_ecc_buf);
 			return -EINVAL;
 		}
 
 		// correct data
 		{
 			int count;
-			unsigned char * read_ecc = &mtd_ecc_buf[MTD_ECC_DSIZE];
-			unsigned char * page = mtd_ecc_buf;
+			unsigned char * read_ecc = &me->rd_ecc_buf[MTD_ECC_DSIZE];
+			unsigned char * page = me->rd_ecc_buf;
 			int k;
-			
       unsigned char calc_ecc[MTD_ECC_ESIZE];
 
       memset(calc_ecc,0,sizeof(calc_ecc));
-      encode_bch(mtd_ecc_bch,page,MTD_ECC_DSIZE,calc_ecc);
-
+      encode_bch(me->bch,page,MTD_ECC_DSIZE,calc_ecc);
 
       /* apply mask so that an erased page is a valid codeword */
       for (k=0;k<0xff;k++) {
-        calc_ecc[k] ^= mtd_ecc_eccmask[k];
+        calc_ecc[k] ^= me->eccmask[k];
       }
 
-			count = decode_bch(mtd_ecc_bch,page,MTD_ECC_DSIZE,read_ecc,calc_ecc,NULL,mtd_ecc_errloc); 
+			count = decode_bch(me->bch,page,MTD_ECC_DSIZE,read_ecc,calc_ecc,NULL,me->errloc); 
 
       if (count > 0) {
         for (k=0;k<count;k++) {
-          if (mtd_ecc_errloc[k] < (MTD_ECC_DSIZE*8) ) {
+          if (me->errloc[k] < (MTD_ECC_DSIZE*8) ) {
             // error is in data, correct it
-            page[mtd_ecc_errloc[k] >> 3] ^= (1 << (mtd_ecc_errloc[k] & 7));
+            page[me->errloc[k] >> 3] ^= (1 << (me->errloc[k] & 7));
           }
-          dev_notice(&mtd->dev,"%s: corrected bitflip %u\n",__func__,mtd_ecc_errloc[k]);
+          dev_notice(&mtd->dev,"%s: corrected bitflip %u\n",__func__,me->errloc[k]);
         }
       } else if (count < 0) {
         dev_err(&mtd->dev,"ECC unrecoverable error (count:%d)\n",count);
       }
-
 		}
-
 
 		buf_out_index = i * MTD_ECC_DSIZE;
 		if (i == 0) {
-			buf_in_index = start_offset;
+			buf_in_index = mureq.start_offset;
 		} else {
 			buf_in_index = 0;
 		}
@@ -200,11 +226,10 @@ static int mtd_ecc_read(struct mtd_info *mtd, loff_t from, size_t len,
 		read_remaining -= buf_cpy_len;
 		DBG_MTDECC(&mtd->dev,"memcpy %d bytes: 0x%08x -> 0x%08x\n",buf_cpy_len,buf_in_index,buf_out_index);
 		// get the data from the requested offset in the buffer
-		memcpy(&buf[buf_out_index],&mtd_ecc_buf[buf_in_index],buf_cpy_len);
+		memcpy(&buf[buf_out_index],&me->rd_ecc_buf[buf_in_index],buf_cpy_len);
 
 		*retlen += buf_cpy_len;
 	}
-	kfree(mtd_ecc_buf);
 
 	return 0;
 }
@@ -222,95 +247,76 @@ static int mtd_ecc_read(struct mtd_info *mtd, loff_t from, size_t len,
 static int mtd_ecc_write(struct mtd_info *mtd, loff_t to, size_t len,
 			size_t *retlen, const u_char *buf)
 {
-	loff_t start_sect;
-	loff_t to_offset = to;
-	size_t start_offset;
-	size_t under_sects;
-	size_t whole_sect_length;
 	size_t write_remaining = len;
 	int rc,i;
-	char * mtd_ecc_buf;
+	struct mtd_ecc_under_req mureq;
+	struct mtd_ecc_info * me = (struct mtd_ecc_info *)mtd->priv;
 
-	start_sect = to * 4096LL;
-	do_div(start_sect,3840LL);
-  // NOTE: do_div returns remainder
-	do_div(start_sect,0x10000LL);
-	start_offset = do_div(to_offset,0xf000);
-	DBG_MTDECC(&mtd->dev,"write : to : 0x%llx, len: %d\n",to,len);
- 	whole_sect_length = len + start_offset;
-	under_sects = (whole_sect_length / 61440) + ((whole_sect_length % 61440) > 0);
-
-	mtd_ecc_buf = kmalloc(0x10000,GFP_KERNEL);
-	for (i=0;i<under_sects;i++) {
+	mtd_ecc_calc_under_sect(me,&mureq,to,len);
+	
+	for (i=0;i<mureq.under_sects;i++) {
 		size_t buf_out_index = 0;
 		size_t buf_in_index = 0;
 		size_t buf_cpy_len = 0;
 		loff_t under_to;
 		size_t under_retlen = 0;
 
-    int j;
-
-
-		buf_in_index = i * 0xf000;
+		buf_in_index = i * MTD_ECC_DSIZE;
 		if (i == 0) {
-			buf_out_index = start_offset;
+			buf_out_index = mureq.start_offset;
 		} else {
 			buf_out_index = 0;
 		}
-		if (write_remaining > 0xf000) {
-			buf_cpy_len = 0xf000 - buf_out_index;
+		if (write_remaining > MTD_ECC_DSIZE) {
+			buf_cpy_len = MTD_ECC_DSIZE - buf_out_index;
 		} else {
 			buf_cpy_len = write_remaining;
 		}
 		write_remaining -= buf_cpy_len;
 
-		under_to = (start_sect + i) * 0x10000;
+		under_to = (mureq.start_sect + i) * MTD_ECC_PSIZE;
 	
-		if (buf_cpy_len < 0xf000) {
+		if (buf_cpy_len < MTD_ECC_DSIZE) {
 			// We have to read the sector so we can calculate the BCH
-			if ((rc = mtd_under->_read(mtd_under,under_to,0x10000,&under_retlen,mtd_ecc_buf))<0) {
-				dev_err(&mtd->dev,"Problem reading %d bytes from 0x%08llx\n",0x10000,under_to);
-				kfree(mtd_ecc_buf);
+			if ((rc = me->mtd_under->_read(me->mtd_under,under_to,MTD_ECC_PSIZE,&under_retlen,me->wr_ecc_buf))<0) {
+				dev_err(&mtd->dev,"Problem reading %d bytes from 0x%08llx\n",MTD_ECC_PSIZE,under_to);
 				return rc;
 			}
 			DBG_MTDECC(&mtd->dev,"under->_read rc: %d retlen: %d\n",rc,under_retlen);
 		}
 
 		// get the data from the requested offset in the buffer
-		memcpy(&mtd_ecc_buf[buf_out_index],&buf[buf_in_index],buf_cpy_len);
+		memcpy(&me->wr_ecc_buf[buf_out_index],&buf[buf_in_index],buf_cpy_len);
 
     // encode the ecc stuff
-    for (j=0;j<16;j++) {
+    {
       int k;
-      unsigned char * code = &mtd_ecc_buf[0xf000 + (j*0x100)];
-      unsigned char * page = &mtd_ecc_buf[j*0xf00];
+      unsigned char * code = &me->wr_ecc_buf[MTD_ECC_DSIZE];
+      unsigned char * page = me->wr_ecc_buf;
       
 
       // Clear parity bits to zero
       memset(code,0,0xff);
-      encode_bch(mtd_ecc_bch,page,0xf00,code);
+      encode_bch(me->bch,page,MTD_ECC_DSIZE,code);
 
       /* apply mask so that an erased page is a valid codeword */
       for (k=0;k<0xff;k++) {
-        code[k] ^= mtd_ecc_eccmask[k];
+        code[k] ^= me->eccmask[k];
       }
     }
 
 
 		DBG_MTDECC(&mtd->dev,"under->_write: to 0x%llx\n",under_to);
-		if ((rc = mtd_under->_write(mtd_under,under_to,0x10000,&under_retlen,mtd_ecc_buf))<0) {
-			dev_err(&mtd->dev,"Problem writing %d bytes to 0x%08llx\n",0x10000,under_to);
-			kfree(mtd_ecc_buf);
+		if ((rc = me->mtd_under->_write(me->mtd_under,under_to,MTD_ECC_PSIZE,&under_retlen,me->wr_ecc_buf))<0) {
+			dev_err(&mtd->dev,"Problem writing %d bytes to 0x%08llx\n",MTD_ECC_PSIZE,under_to);
 			return rc;
 		}
-		if (under_retlen != 0x10000 ) {
-			dev_err(&mtd->dev,"Under write. %d instead of %d\n",under_retlen,0x10000);
-			kfree(mtd_ecc_buf);
+		if (under_retlen != MTD_ECC_PSIZE) {
+			dev_err(&mtd->dev,"Under write. %d instead of %d\n",under_retlen,MTD_ECC_PSIZE);
 			return -EINVAL;
 		}
 		*retlen += buf_cpy_len;
 	}
-	kfree(mtd_ecc_buf);
 	
 	return 0;
 }
@@ -328,51 +334,33 @@ static int mtd_ecc_erase(struct mtd_info *mtd, struct erase_info *instr)
 	struct erase_info under_erase;
 	struct erase_info * current_instr = instr;
 	int rc=0;
+	struct mtd_ecc_info * me = (struct mtd_ecc_info *)mtd->priv;
 
 	while (current_instr) {
 
 		memcpy(&under_erase,current_instr,sizeof(struct erase_info));
 		
-		under_erase.mtd = mtd_under;
+		under_erase.mtd = me->mtd_under;
 
 		// let's assume that current_instr->address will always be a whole sector
-		under_erase.addr = current_instr->addr * 4096ULL;
-		do_div(under_erase.addr,3840ULL);
-		under_erase.len = current_instr->len * 4096ULL;
-		do_div(under_erase.len,3840ULL);
+		under_erase.addr = current_instr->addr * MTD_ECC_PSIZEULL;
+		do_div(under_erase.addr,MTD_ECC_DSIZEULL);
+		under_erase.len = current_instr->len * MTD_ECC_PSIZEULL;
+		do_div(under_erase.len,MTD_ECC_DSIZEULL);
 
 		DBG_MTDECC(&mtd->dev,"Erase request: 0x%llx bytes from 0x%llx\n",current_instr->len, current_instr->addr);
 		DBG_MTDECC(&mtd->dev,"Translated to: 0x%llx bytes from 0x%llx\n",under_erase.len, under_erase.addr);
 
-		DBG_MTDECC(&mtd->dev,"EI.fail_addr: 0x%llx\n",current_instr->fail_addr);
-		DBG_MTDECC(&mtd->dev,"EI.time: 0x%x\n",(unsigned int)current_instr->time);
-		DBG_MTDECC(&mtd->dev,"EI.retries: 0x%x\n",(unsigned int)current_instr->retries);
-		DBG_MTDECC(&mtd->dev,"EI.dev: 0x%x\n",current_instr->dev);
-		DBG_MTDECC(&mtd->dev,"EI.cell: 0x%x\n",current_instr->cell);
-		DBG_MTDECC(&mtd->dev,"EI.callback: 0x%p\n",current_instr->callback);
 		// clear the callback so we can execute it correctly
 		under_erase.callback = NULL;
-		DBG_MTDECC(&mtd->dev,"EI.priv: 0x%x\n",(unsigned int)current_instr->priv);
-		DBG_MTDECC(&mtd->dev,"EI.state: 0x%x\n",current_instr->state);
-		DBG_MTDECC(&mtd->dev,"EI.next: 0x%p\n",current_instr->next);
 		under_erase.next = NULL;
 
-		if ((rc = mtd_under->_erase(mtd_under,&under_erase))<0){
+		if ((rc = me->mtd_under->_erase(me->mtd_under,&under_erase))<0){
 			dev_err(&mtd->dev,"Error erasing.\n");
 			break;
 		}
-		DBG_MTDECC(&mtd->dev,"under->_erase returned %d\n",rc);
-		DBG_MTDECC(&mtd->dev,"EI.fail_addr: 0x%llx\n",under_erase.fail_addr);
-		DBG_MTDECC(&mtd->dev,"EI.time: 0x%x\n",(unsigned int)under_erase.time);
-		DBG_MTDECC(&mtd->dev,"EI.retries: 0x%x\n",(unsigned int)under_erase.retries);
-		DBG_MTDECC(&mtd->dev,"EI.dev: 0x%x\n",under_erase.dev);
-		DBG_MTDECC(&mtd->dev,"EI.cell: 0x%x\n",under_erase.cell);
-		DBG_MTDECC(&mtd->dev,"EI.callback: 0x%p\n",under_erase.callback);
 		// clear the callback so we can execute it correctly
 		under_erase.callback = NULL;
-		DBG_MTDECC(&mtd->dev,"EI.priv: 0x%x\n",(unsigned int)under_erase.priv);
-		DBG_MTDECC(&mtd->dev,"EI.state: 0x%x\n",under_erase.state);
-		DBG_MTDECC(&mtd->dev,"EI.next: 0x%p\n",under_erase.next);
 			// copy in the state
 		current_instr->state = under_erase.state;
 		mtd_erase_callback(current_instr);
@@ -392,8 +380,13 @@ static int mtd_ecc_erase(struct mtd_info *mtd, struct erase_info *instr)
  */
 static int mtd_ecc_get_device(struct mtd_info *mtd)
 {
-	DBG_MTDECC(&mtd->dev,"get_device: %p\n",mtd_under->_get_device);
-	return(mtd_under->_get_device(mtd_under));
+	struct mtd_ecc_info * me = (struct mtd_ecc_info *)mtd->priv;
+	if (me->mtd_under->_get_device) {
+		DBG_MTDECC(&mtd->dev,"get_device: %p\n",me->mtd_under->_get_device);
+		return(me->mtd_under->_get_device(me->mtd_under));
+	} else {
+		return -ENOSYS;
+	}
 }
 	
 
@@ -406,7 +399,8 @@ static int mtd_ecc_get_device(struct mtd_info *mtd)
  */
 static void mtd_ecc_put_device(struct mtd_info *mtd)
 {
-	return(mtd_under->_put_device(mtd_under));
+	struct mtd_ecc_info * me = (struct mtd_ecc_info *)mtd->priv;
+	return(me->mtd_under->_put_device(me->mtd_under));
 }
 
 static int __init mtdecc_init(void)
@@ -414,12 +408,36 @@ static int __init mtdecc_init(void)
 	int err = 0;
   int i;
   struct mtd_info * mtd;
+	struct mtd_ecc_info * me;
+
+	me = kzalloc(sizeof(struct mtd_ecc_info),GFP_KERNEL);
+	if (!me) {
+		printk(KERN_ERR "Unable to allocate memory for mtd_ecc_info\n");
+		return -ENOMEM;
+	}
+	me->sect_psize = MTD_ECC_PSIZE;
+	me->sect_dsize = MTD_ECC_DSIZE;
+	me->sect_esize = MTD_ECC_ESIZE;
+
+	me->rd_ecc_buf = kzalloc(me->sect_psize,GFP_KERNEL);
+	if (!me->rd_ecc_buf) {
+		err = -ENOMEM;
+		goto init_return_me_alloc;
+	}
+	me->wr_ecc_buf = kzalloc(me->sect_psize,GFP_KERNEL);
+	if (!me->wr_ecc_buf) {
+		err = -ENOMEM;
+		goto init_return_rd_buf_alloc;
+	}
+
+// TODO: Get this from parameters
 #define MTD_NUM 39
 
-	mtd_under = get_mtd_device(NULL, MTD_NUM);
-  if (!mtd_under) {
+	me->mtd_under = get_mtd_device(NULL, MTD_NUM);
+  if (!me->mtd_under) {
 		printk(KERN_ERR "Unable to get MTD device 39.\n");
-		return -ENODEV;
+		err = -ENODEV;
+		goto init_return_wr_buf_alloc;
 	}
 
 	mtd = kzalloc(sizeof(struct mtd_info),GFP_KERNEL);
@@ -427,50 +445,59 @@ static int __init mtdecc_init(void)
 		err = -ENOMEM; 
 		goto init_return_mtd_under;
 	}
-
+	mtd->priv = (void *)me;
 	mtd->name = "MTD ECC";
 	mtd->type = MTD_ECCNORFLASH;
-	printk(KERN_NOTICE "MTD Under flags: 0x%08x\n",mtd_under->flags);
-	mtd->flags = mtd_under->flags; // TODO: Add a switch
+	printk(KERN_NOTICE "MTD Under flags: 0x%08x\n",me->mtd_under->flags);
+	mtd->flags = me->mtd_under->flags; // TODO: Add a switch
 	// mtd->writesize = 3840; // TODO: Re-enable SECT_4K flag for Q7 NOR flash
-	mtd->erasesize = (mtd_under->erasesize * 3840)/4096; // Using the same as under for now
+	mtd->erasesize = (me->mtd_under->erasesize * 3840)/4096; // Using the same as under for now
 	printk(KERN_NOTICE "Setting erase/writesize to %d\n",mtd->erasesize);
 	mtd->writesize = 256; // TODO: This needs to be 64k for UBI above
 	mtd->_read = mtd_ecc_read;
 	mtd->_write = mtd_ecc_write;
 	mtd->_erase = mtd_ecc_erase;
-  if (mtd_under->_get_device) 
+
+	//====================================================================
+	// TODO: Is this wise? This is probably going to conflict with the
+	// get_mtd_device() we just called above
+  if (me->mtd_under->_get_device) 
 	  mtd->_get_device = mtd_ecc_get_device;
-  if (mtd_under->_put_device)
+  if (me->mtd_under->_put_device)
 	  mtd->_put_device = mtd_ecc_put_device;
-	mtd->size = mtd_under->size * 3840ULL;
-  do_div(mtd->size, 4096ULL);
-	//mtd->size = (mtd->size * 3840) / 4096; // TODO: Verify this
-	mtd->numeraseregions = mtd_under->numeraseregions;
+	//====================================================================
+
+
+	//mtd->size = (mtd->size * 3840) / 4096; 
+	mtd->size = me->mtd_under->size * me->sect_dsize;
+  do_div(mtd->size, (uint64_t)me->sect_psize);
+
+	mtd->numeraseregions = me->mtd_under->numeraseregions;
 	mtd->eraseregions = kmalloc(sizeof(struct mtd_erase_region_info)
 				    * mtd->numeraseregions, GFP_KERNEL);
 	printk(KERN_NOTICE "configuring %d erase regions\n",mtd->numeraseregions);
 	for (i=0;i<mtd->numeraseregions;i++) {
-		mtd->eraseregions[i].offset = mtd_under->eraseregions[i].offset;
-		mtd->eraseregions[i].erasesize= mtd_under->eraseregions[i].erasesize;
-		mtd->eraseregions[i].numblocks= mtd_under->eraseregions[i].numblocks;
-		if (mtd_under->eraseregions[i].lockmap)
+		mtd->eraseregions[i].offset = me->mtd_under->eraseregions[i].offset;
+		mtd->eraseregions[i].erasesize= me->mtd_under->eraseregions[i].erasesize;
+		mtd->eraseregions[i].numblocks= me->mtd_under->eraseregions[i].numblocks;
+		if (me->mtd_under->eraseregions[i].lockmap) {
 			printk(KERN_WARNING "MTD under has non-null lockmap\n");
-		mtd->eraseregions[i].lockmap= mtd_under->eraseregions[i].lockmap;
+			mtd->eraseregions[i].lockmap=me->mtd_under->eraseregions[i].lockmap;
+		}
 	}
-	if (mtd_under->_lock)
+	if (me->mtd_under->_lock)
 		mtd->_lock = mtd_ecc_lock;
 
-	if (mtd_under->_unlock)
+	if (me->mtd_under->_unlock)
 		mtd->_unlock = mtd_ecc_unlock;
 
-	if (mtd_under->_is_locked)
+	if (me->mtd_under->_is_locked)
 		mtd->_is_locked = mtd_ecc_is_locked;
 
-	mtd->dev.parent = &mtd_under->dev;
+	mtd->dev.parent = &me->mtd_under->dev;
 
 	mtd->writebufsize = 256;
-	printk(KERN_NOTICE "MTD under writebufsize: %d\n",mtd_under->writebufsize);
+	printk(KERN_NOTICE "MTD under writebufsize: %d\n",me->mtd_under->writebufsize);
 	
 	if (mtd_device_register(mtd,NULL,0)) {
 		printk(KERN_ERR "Cannot add MTD device");
@@ -478,7 +505,7 @@ static int __init mtdecc_init(void)
 		goto init_free_mtd_ecc;
 	}
 
-	mtd_ecc = mtd;
+	me->mtd_ecc = mtd;
 
 
   /* set-up BCH ECC */
@@ -515,73 +542,92 @@ static int __init mtdecc_init(void)
 	*/
 #define MTD_ECC_BCH_M 15
 #define MTD_ECC_BCH_T 136
-	dev_notice(&mtd->dev,"Starting init_bch\n");
-	mtd_ecc_bch = init_bch(MTD_ECC_BCH_M,MTD_ECC_BCH_T,0);
-	if (!mtd_ecc_bch) {
+	dev_notice(&me->mtd_ecc->dev,"Starting init_bch\n");
+	me->bch = init_bch(MTD_ECC_BCH_M,MTD_ECC_BCH_T,0);
+	if (!me->bch) {
 		printk(KERN_ERR "Error initializing BCH\n");
     err = -ENOMEM;
 		goto init_free_mtd_ecc;
 	}
-	if (mtd_ecc_bch->ecc_bytes != 255) {
-		printk(KERN_ERR "Invalid eccbytes %u, should be 255\n",mtd_ecc_bch->ecc_bytes);
+	if (me->bch->ecc_bytes != 255) {
+		printk(KERN_ERR "Invalid eccbytes %u, should be 255\n",me->bch->ecc_bytes);
     err = -EINVAL;
 		goto init_free_mtd_ecc_bch;
 	}
-  dev_notice(&mtd->dev,"ecc_bits: %d n:%d (n-ecc_bits:%d)\n",mtd_ecc_bch->ecc_bits,
-      mtd_ecc_bch->n,(mtd_ecc_bch->n-mtd_ecc_bch->ecc_bits));
+  dev_notice(&mtd->dev,"ecc_bits: %d n:%d (n-ecc_bits:%d)\n",me->bch->ecc_bits,
+      me->bch->n,(me->bch->n - me->bch->ecc_bits));
   {
     unsigned char * erased_page;
-    mtd_ecc_eccmask = kmalloc(mtd_ecc_bch->ecc_bytes, GFP_KERNEL);
-    mtd_ecc_errloc = kmalloc(MTD_ECC_BCH_T*sizeof(unsigned int),GFP_KERNEL);
-    if (!mtd_ecc_eccmask || !mtd_ecc_errloc) {
-      printk(KERN_ERR "Unable to allocate %d bytes for mtd_ecc_eccmask\n",mtd_ecc_bch->ecc_bytes);
+    me->eccmask = kmalloc(me->bch->ecc_bytes, GFP_KERNEL);
+    me->errloc = kmalloc(MTD_ECC_BCH_T*sizeof(unsigned int),GFP_KERNEL);
+    if (!me->eccmask || !me->errloc) {
+      printk(KERN_ERR "Unable to allocate %d bytes for mtd_ecc_eccmask\n",me->bch->ecc_bytes);
       goto init_free_eccmask;
     }
-    erased_page = kmalloc(3840,GFP_KERNEL);
+    erased_page = kmalloc(me->sect_dsize,GFP_KERNEL);
     if (!erased_page) {
-      printk(KERN_ERR "Unable to allocate erased_page of %d bytes\n",0xf00);
+      printk(KERN_ERR "Unable to allocate erased_page of %d bytes\n",me->sect_dsize);
       goto init_free_eccmask;
     }
-    memset(erased_page,0xff,0xf00);
-    memset(mtd_ecc_eccmask,0,mtd_ecc_bch->ecc_bytes);
-    encode_bch(mtd_ecc_bch,erased_page,0xf00,mtd_ecc_eccmask);
+    memset(erased_page,0xff,me->sect_dsize);
+    memset(me->eccmask,0,me->bch->ecc_bytes);
+    encode_bch(me->bch,erased_page,me->sect_dsize,me->eccmask);
     kfree(erased_page);
-    for (i=0;i<mtd_ecc_bch->ecc_bytes;i++) {
-      mtd_ecc_eccmask[i] ^= 0xff;
+    for (i=0;i<me->bch->ecc_bytes;i++) {
+      me->eccmask[i] ^= 0xff;
     }
 #if 0
     dev_notice(&mtd->dev,"eccmask:\n");
     for (i=0;i<0xff;i+=8) {
-      dev_notice(&mtd->dev,"%02x %02x %02x %02x %02x %02x %02x %02x\n",mtd_ecc_eccmask[i],
-        mtd_ecc_eccmask[i+1],mtd_ecc_eccmask[i+2],mtd_ecc_eccmask[i+3],
-mtd_ecc_eccmask[i+4],mtd_ecc_eccmask[i+5],mtd_ecc_eccmask[i+6],mtd_ecc_eccmask[i+7]);
+      dev_notice(&mtd->dev,"%02x %02x %02x %02x %02x %02x %02x %02x\n",me->eccmask[i],
+				me->eccmask[i+1],me->eccmask[i+2],me->eccmask[i+3],
+				me->eccmask[i+4],me->eccmask[i+5],me->eccmask[i+6],me->eccmask[i+7]);
     }
 #endif
   }
   dev_notice(&mtd->dev,"Finished init_bch\n");
 
+  list_add(&me->list,&me_list);
+
+
 	return 0;
 
+
+
 init_free_eccmask:
-  kfree(mtd_ecc_eccmask);
-  kfree(mtd_ecc_errloc);
+  kfree(me->eccmask);
+  kfree(me->errloc);
 
 init_free_mtd_ecc_bch:
-	free_bch(mtd_ecc_bch);
+	free_bch(me->bch);
 
 init_free_mtd_ecc:
 	kfree(mtd);
 
 init_return_mtd_under:
-	put_mtd_device(mtd_under);
+	put_mtd_device(me->mtd_under);
+
+init_return_wr_buf_alloc:
+	kfree(me->wr_ecc_buf);
+
+init_return_rd_buf_alloc:
+	kfree(me->rd_ecc_buf);
+
+init_return_me_alloc:
+	kfree(me);
 	
 	return err;
 }
 
 static void __exit mtdecc_exit(void) 
 {
+  struct list_head *m;
 
-	mtd_device_unregister(mtd_ecc);
+	list_for_each(m, &me_list) {
+		struct mtd_ecc_info * me;
+		me = list_entry(m,struct mtd_ecc_info, list);
+		mtd_device_unregister(me->mtd_ecc);
+	}
 
 }
 
