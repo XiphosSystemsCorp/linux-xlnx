@@ -473,6 +473,9 @@ static struct mtd_part *allocate_partition(struct mtd_info *master,
 		printk(KERN_WARNING"mtd: partition \"%s\" extends beyond the end of device \"%s\" -- size truncated to %#llx\n",
 			part->name, master->name, (unsigned long long)slave->mtd.size);
 	}
+	if (part->erasesize) {
+		slave->mtd.erasesize = part->erasesize;
+	} else
 	if (master->numeraseregions > 1) {
 		/* Deal with variable erase size stuff */
 		int i, max = master->numeraseregions;
@@ -558,6 +561,7 @@ int mtd_add_partition(struct mtd_info *master, const char *name,
 	part.offset = offset;
 	part.mask_flags = 0;
 	part.ecclayout = NULL;
+	part.erasesize = 0;
 
 	new = allocate_partition(master, &part, -1, offset);
 	if (IS_ERR(new))

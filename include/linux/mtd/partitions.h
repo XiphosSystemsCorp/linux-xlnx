@@ -42,6 +42,7 @@ struct mtd_partition {
 	uint64_t offset;		/* offset within the master MTD space */
 	uint32_t mask_flags;		/* master MTD flags to mask out for this partition */
 	struct nand_ecclayout *ecclayout;	/* out of band layout for this partition (NAND only) */
+	uint32_t erasesize;	/* To permit explicit setting of desired erase size for partition */
 };
 
 #define MTDPART_OFS_RETAIN	(-3)

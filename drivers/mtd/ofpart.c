@@ -63,6 +63,7 @@ static int parse_ofpart_partitions(struct mtd_info *master,
 		const __be32 *reg;
 		int len;
 		int a_cells, s_cells;
+		int erasesize = 0;
 
 		if (node_has_compatible(pp))
 			continue;
@@ -88,6 +89,12 @@ static int parse_ofpart_partitions(struct mtd_info *master,
 
 		if (of_get_property(pp, "lock", &len))
 			(*pparts)[i].mask_flags |= MTD_POWERUP_LOCK;
+
+		if (of_property_read_u32(pp, "erasesize", &erasesize) == 0)
+			(*pparts)[i].erasesize = erasesize;
+		else
+			(*pparts)[i].erasesize = 0;
+		
 
 		i++;
 	}
