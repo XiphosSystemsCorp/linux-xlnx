@@ -1745,6 +1745,7 @@ static int m25p_probe(struct spi_device *spi)
 	else if (flash->mtd.size > 0x1000000) {
 		/* enable 4-byte addressing if the device exceeds 16MiB */
 #ifdef CONFIG_OF
+		u32 enable_sect_4k = 0;
 		np = of_get_next_parent(spi->dev.of_node);
 		if (of_property_match_string(np, "compatible",
 		    "xlnx,zynq-qspi-1.0") >= 0) {
@@ -1756,9 +1757,19 @@ static int m25p_probe(struct spi_device *spi)
 				dev_warn(&spi->dev, "failed to read ear reg\n");
 			else
 				flash->curbank = status & EAR_SEGMENT_MASK;
-			// Disable small erase to enable UBI
-			flash->erase_opcode = OPCODE_SE;
-			flash->mtd.erasesize = info->sector_size;
+			if (of_property_read_u32(spi->dev.of_node, "xiphos,enable_sect_4k", &enable_sect_4k) == 0) {
+				dev_warn(&spi->dev, "Found xiphos,enable_sect_4k\n");
+				if (enable_sect_4k) {
+					dev_warn(&spi->dev, "Using SECT_4K erase size\n");
+				}
+			}
+			if (!enable_sect_4k &&
+					(flash->erase_opcode == OPCODE_BE_4K || flash->erase_opcode == OPCODE_BE_4K_PMC)) {
+				dev_warn(&spi->dev, "Disabling SECT_4K erase size\n");
+				// Disable small erase to enable UBI
+				flash->erase_opcode = OPCODE_SE;
+				flash->mtd.erasesize = info->sector_size;
+			}
 		} else {
 #endif
 		flash->addr_width = 4;
