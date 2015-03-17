@@ -151,14 +151,9 @@ static int mtd_ecc_read(struct mtd_info *mtd, loff_t from, size_t len,
 	mtd_ecc_calc_under_sect(me,&mureq,from,len);
 	
 
-#if 0
-	if (len > 61440) {
-		dev_err(&mtd->dev, "Read length: %d too long.\n",len);
-		return -EINVAL;
-	}
-#endif
-  /* TODO: To increase performance, the reads from the lower device should be
- * as large as possible and then perform the ECC.
+ /* TODO: To increase performance, the reads from the lower device should be
+ * as large as possible and then perform the ECC. Presently we're getting 1.2
+ * MB/sec sustained 
  * In an ideal world we would somehow schedule the underlying read to happen
  * while performing the ECC calcs in the 'foreground' */
 	for (i=0;i<mureq.under_sects;i++) {
@@ -277,10 +272,33 @@ static int mtd_ecc_write(struct mtd_info *mtd, loff_t to, size_t len,
 		under_to = (mureq.start_sect + i) * MTD_ECC_PSIZE;
 	
 		if (buf_cpy_len < MTD_ECC_DSIZE) {
+			int j;
+			u32 * buf;
+			u32 pre_erase_sect = 0;
 			// We have to read the sector so we can calculate the BCH
 			if ((rc = me->mtd_under->_read(me->mtd_under,under_to,MTD_ECC_PSIZE,&under_retlen,me->wr_ecc_buf))<0) {
 				dev_err(&mtd->dev,"Problem reading %d bytes from 0x%08llx\n",MTD_ECC_PSIZE,under_to);
 				return rc;
+			}
+			// Check if the sector is empty by looking for non 0xff in the ECC section
+			buf = (u32 *)(&me->wr_ecc_buf[MTD_ECC_DSIZE]);
+			for (j=0;j<((MTD_ECC_PSIZE-MTD_ECC_DSIZE)/4);j++) {
+				if (buf[j] != 0xffffffff) {
+					pre_erase_sect = 1;
+					break;
+				}
+			}
+			if (pre_erase_sect) {
+				struct erase_info under_erase;
+				under_erase.mtd = me->mtd_under;
+				under_erase.addr = under_to;
+				under_erase.len = MTD_ECC_PSIZE;
+				under_erase.callback = NULL;
+				under_erase.next = NULL;
+				if ((rc = me->mtd_under->_erase(me->mtd_under,&under_erase))<0){
+					dev_err(&mtd->dev,"Error erasing.\n");
+					break;
+				}
 			}
 			DBG_MTDECC(&mtd->dev,"under->_read rc: %d retlen: %d\n",rc,under_retlen);
 		}
@@ -431,7 +449,7 @@ static int __init mtdecc_init(void)
 	}
 
 // TODO: Get this from parameters
-#define MTD_NUM 39
+#define MTD_NUM 40
 
 	me->mtd_under = get_mtd_device(NULL, MTD_NUM);
   if (!me->mtd_under) {
@@ -451,9 +469,11 @@ static int __init mtdecc_init(void)
 	printk(KERN_NOTICE "MTD Under flags: 0x%08x\n",me->mtd_under->flags);
 	mtd->flags = me->mtd_under->flags; // TODO: Add a switch
 	// mtd->writesize = 3840; // TODO: Re-enable SECT_4K flag for Q7 NOR flash
-	mtd->erasesize = (me->mtd_under->erasesize * 3840)/4096; // Using the same as under for now
-	printk(KERN_NOTICE "Setting erase/writesize to %d\n",mtd->erasesize);
-	mtd->writesize = 256; // TODO: This needs to be 64k for UBI above
+	//mtd->erasesize = (me->mtd_under->erasesize * 3840)/4096; // Using the same as under for now
+	mtd->erasesize = 0xf000; // (64k * 3840) / 4096
+	printk(KERN_NOTICE "Setting erasesize to %d\n",mtd->erasesize);
+	mtd->writesize = me->mtd_under->writesize; // TODO: Verify
+	printk(KERN_NOTICE "Setting writesize to %d\n",mtd->writesize);
 	mtd->_read = mtd_ecc_read;
 	mtd->_write = mtd_ecc_write;
 	mtd->_erase = mtd_ecc_erase;
@@ -472,6 +492,7 @@ static int __init mtdecc_init(void)
 	mtd->size = me->mtd_under->size * me->sect_dsize;
   do_div(mtd->size, (uint64_t)me->sect_psize);
 
+  // NOTE: UBI does not support multiple erase regions
 	mtd->numeraseregions = me->mtd_under->numeraseregions;
 	mtd->eraseregions = kmalloc(sizeof(struct mtd_erase_region_info)
 				    * mtd->numeraseregions, GFP_KERNEL);
@@ -496,7 +517,7 @@ static int __init mtdecc_init(void)
 
 	mtd->dev.parent = &me->mtd_under->dev;
 
-	mtd->writebufsize = 256;
+	mtd->writebufsize = 0x10000;
 	printk(KERN_NOTICE "MTD under writebufsize: %d\n",me->mtd_under->writebufsize);
 	
 	if (mtd_device_register(mtd,NULL,0)) {
