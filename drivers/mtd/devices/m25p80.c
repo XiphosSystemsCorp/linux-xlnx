@@ -77,9 +77,10 @@
 #define	SR_WIP			1	/* Write in progress */
 #define	SR_WEL			2	/* Write enable latch */
 /* meaning of other SR_* bits may differ between vendors */
-#define	SR_BP0			4	/* Block protect 0 */
-#define	SR_BP1			8	/* Block protect 1 */
+#define	SR_BP0			0x4		/* Block protect 0 */
+#define	SR_BP1			0x8		/* Block protect 1 */
 #define	SR_BP2			0x10	/* Block protect 2 */
+#define SR_BP3			0x40	/* Block protect 3 */
 #define	SR_SRWD			0x80	/* SR write protect */
 
 /* Extended/Bank Address Register bits */
@@ -842,23 +843,24 @@ static int m25p80_lock(struct mtd_info *mtd, loff_t ofs, uint64_t len)
 	status_old = read_sr(flash);
 
 	if (offset < flash->mtd.size-(flash->mtd.size/2))
-		status_new = status_old | SR_BP2 | SR_BP1 | SR_BP0;
+		status_new = status_old | SR_BP3 | SR_BP2 | SR_BP1 | SR_BP0;
 	else if (offset < flash->mtd.size-(flash->mtd.size/4))
-		status_new = (status_old & ~SR_BP0) | SR_BP2 | SR_BP1;
+		status_new = (status_old & ~SR_BP0) | SR_BP3 | SR_BP2 | SR_BP1;
 	else if (offset < flash->mtd.size-(flash->mtd.size/8))
-		status_new = (status_old & ~SR_BP1) | SR_BP2 | SR_BP0;
+		status_new = (status_old & ~SR_BP1) SR_BP3 | SR_BP2 | SR_BP0;
 	else if (offset < flash->mtd.size-(flash->mtd.size/16))
-		status_new = (status_old & ~(SR_BP0|SR_BP1)) | SR_BP2;
+		status_new = (status_old & ~(SR_BP0|SR_BP1)) | SR_BP3 | SR_BP2;
 	else if (offset < flash->mtd.size-(flash->mtd.size/32))
-		status_new = (status_old & ~SR_BP2) | SR_BP1 | SR_BP0;
+		status_new = (status_old & ~SR_BP2) | SR_BP3 | SR_BP1 | SR_BP0;
 	else if (offset < flash->mtd.size-(flash->mtd.size/64))
-		status_new = (status_old & ~(SR_BP2|SR_BP0)) | SR_BP1;
+		status_new = (status_old & ~(SR_BP2|SR_BP0)) | SR_BP3 | SR_BP1;
+	else if (offset < flash->mtd.size-(flash->mtd.size/128))
+		status_new = (status_old & ~SR_BP3) | SR_BP2 | SR_BP1 | SR_BP0;
 	else
-		status_new = (status_old & ~(SR_BP2|SR_BP1)) | SR_BP0;
+		status_new = (status_old & ~(SR_BP3|SR_BP2|SR_BP1)) | SR_BP0;
 
 	/* Only modify protection if it will not unlock other areas */
-	if ((status_new&(SR_BP2|SR_BP1|SR_BP0)) >
-					(status_old&(SR_BP2|SR_BP1|SR_BP0))) {
+	if ((status_new&(SR_BP3|SR_BP2|SR_BP1|SR_BP0)) > (status_old&(SR_BP3|SR_BP2|SR_BP1|SR_BP0))) {
 		write_enable(flash);
 		if (write_sr(flash, status_new) < 0) {
 			res = 1;
@@ -886,24 +888,25 @@ static int m25p80_unlock(struct mtd_info *mtd, loff_t ofs, uint64_t len)
 
 	status_old = read_sr(flash);
 
-	if (offset+len > flash->mtd.size-(flash->mtd.size/64))
-		status_new = status_old & ~(SR_BP2|SR_BP1|SR_BP0);
+	if (offset+len > flash->mtd.size-(flash->mtd.size/128))
+		status_new = status_old & ~(SR_BP3|SR_BP2|SR_BP1|SR_BP0);
+	else if (offset+len > flash->mtd.size-(flash->mtd.size/64))
+		status_new = status_old & ~(SR_BP2|SR_BP1|SR_BP0) | SR_BP3;
 	else if (offset+len > flash->mtd.size-(flash->mtd.size/32))
-		status_new = (status_old & ~(SR_BP2|SR_BP1)) | SR_BP0;
+		status_new = (status_old & ~(SR_BP2|SR_BP1)) | SR_BP3 | SR_BP0;
 	else if (offset+len > flash->mtd.size-(flash->mtd.size/16))
-		status_new = (status_old & ~(SR_BP2|SR_BP0)) | SR_BP1;
+		status_new = (status_old & ~(SR_BP2|SR_BP0)) | SR_BP3 | SR_BP1;
 	else if (offset+len > flash->mtd.size-(flash->mtd.size/8))
-		status_new = (status_old & ~SR_BP2) | SR_BP1 | SR_BP0;
+		status_new = (status_old & ~SR_BP2) | SR_BP3 | SR_BP1 | SR_BP0;
 	else if (offset+len > flash->mtd.size-(flash->mtd.size/4))
-		status_new = (status_old & ~(SR_BP0|SR_BP1)) | SR_BP2;
+		status_new = (status_old & ~(SR_BP0|SR_BP1)) | SR_BP3 | SR_BP2;
 	else if (offset+len > flash->mtd.size-(flash->mtd.size/2))
-		status_new = (status_old & ~SR_BP1) | SR_BP2 | SR_BP0;
+		status_new = (status_old & ~SR_BP1) | SR_BP3 | SR_BP2 | SR_BP0;
 	else
-		status_new = (status_old & ~SR_BP0) | SR_BP2 | SR_BP1;
+		status_new = (status_old & ~SR_BP0) | SR_BP3 | SR_BP2 | SR_BP1;
 
 	/* Only modify protection if it will not lock other areas */
-	if ((status_new&(SR_BP2|SR_BP1|SR_BP0)) <
-					(status_old&(SR_BP2|SR_BP1|SR_BP0))) {
+	if ((status_new&(SR_BP3|SR_BP2|SR_BP1|SR_BP0)) < (status_old&(SR_BP3|SR_BP2|SR_BP1|SR_BP0))) {
 		write_enable(flash);
 		if (write_sr(flash, status_new) < 0) {
 			res = 1;
