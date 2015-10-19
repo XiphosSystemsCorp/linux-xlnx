@@ -59,6 +59,7 @@
 #include <linux/spi/spi.h>
 #include <linux/usb.h>
 #include <linux/usb/hcd.h>
+#include <linux/of_device.h>
 
 #include <linux/platform_data/max3421-hcd.h>
 
@@ -83,6 +84,7 @@
 			  USB_PORT_STAT_C_SUSPEND |	\
 			  USB_PORT_STAT_C_OVERCURRENT | \
 			  USB_PORT_STAT_C_RESET) << 16)
+
 
 enum max3421_rh_state {
 	MAX3421_RH_RESET,
@@ -1269,13 +1271,13 @@ max3421_handle_irqs(struct usb_hcd *hcd)
 			max3421_hcd->port_status |=  USB_PORT_STAT_ENABLE;
 		} else {
 			/* BUSEVENT due to completion of Bus Resume */
-			pr_info("%s: BUSEVENT Bus Resume Done\n", __func__);
+			pr_debug("%s: BUSEVENT Bus Resume Done\n", __func__);
 		}
 	}
 	if (hirq & BIT(MAX3421_HI_RWU_BIT))
-		pr_info("%s: RWU\n", __func__);
+		pr_debug("%s: RWU\n", __func__);
 	if (hirq & BIT(MAX3421_HI_SUSDN_BIT))
-		pr_info("%s: SUSDN\n", __func__);
+		pr_debug("%s: SUSDN\n", __func__);
 
 	chg = (old_port_status ^ max3421_hcd->port_status);
 	max3421_hcd->port_status |= chg << 16;
@@ -1395,8 +1397,9 @@ max3421_spi_thread(void *dev_id)
 	struct usb_hcd *hcd = dev_id;
 	struct spi_device *spi = to_spi_device(hcd->self.controller);
 	struct max3421_hcd *max3421_hcd = hcd_to_max3421(hcd);
-	int i, i_worked = 1;
-
+	int i = 0;
+	int i_worked = 1;
+	
 	/* set full-duplex SPI mode, low-active interrupt pin: */
 	spi_wr8(hcd, MAX3421_REG_PINCTL,
 		(BIT(MAX3421_PINCTL_FDUPSPI_BIT) |	/* full-duplex */
@@ -1435,8 +1438,9 @@ max3421_spi_thread(void *dev_id)
 
 		if (max3421_hcd->urb_done)
 			i_worked |= max3421_urb_done(hcd);
-		else if (max3421_handle_irqs(hcd))
+		else if (max3421_handle_irqs(hcd)) {
 			i_worked = 1;
+		}
 		else if (!max3421_hcd->curr_urb)
 			i_worked |= max3421_select_and_start_urb(hcd);
 
@@ -1462,19 +1466,20 @@ max3421_spi_thread(void *dev_id)
 			 * use spi_wr_buf().
 			 */
 			for (i = 0; i < ARRAY_SIZE(max3421_hcd->iopins); ++i) {
-				u8 val = spi_rd8(hcd, MAX3421_REG_IOPINS1);
+				u8 val = spi_rd8(hcd, MAX3421_REG_IOPINS1 + i);
 
 				val = ((val & 0xf0) |
 				       (max3421_hcd->iopins[i] & 0x0f));
 				spi_wr8(hcd, MAX3421_REG_IOPINS1 + i, val);
 				max3421_hcd->iopins[i] = val;
+				dev_dbg(&spi->dev, "settings hcd->iopins[%i]=0x%X\n", i, val);
 			}
 			max3421_hcd->do_iopin_update = 0;
 			i_worked = 1;
 		}
 	}
 	set_current_state(TASK_RUNNING);
-	dev_info(&spi->dev, "SPI thread exiting");
+	dev_dbg(&spi->dev, "SPI thread exiting");
 	return 0;
 }
 
@@ -1669,27 +1674,39 @@ hub_descriptor(struct usb_hub_descriptor *desc)
 }
 
 /*
- * Set the MAX3421E general-purpose output with number PIN_NUMBER to
- * VALUE (0 or 1).  PIN_NUMBER may be in the range from 1-8.  For
- * any other value, this function acts as a no-op.
+ * Set the MAX3421E general-purpose output with number GPOUT_NUMBER to
+ * VALUE (0 or 1).  GPOUT_NUMBER may be in the range 0-7.
+ * For any other value, this function acts as a no-op.
+ *
+ * According to datasheet, pins<-->bits ordering is:
+ *   REG       b7       b6      b5      b4      b3       b2       b1       b0
+ * IOPINS1 | GPINS3 | GPIN2 | GPIN1 | GPIN0 | GPOUT3 | GPOUT2 | GPOUT1 | GPOUT0
+ * IOPINS2 | GPINS7 | GPIN6 | GPIN5 | GPIN4 | GPOUT7 | GPOUT6 | GPOUT5 | GPOUT4
  */
 static void
-max3421_gpout_set_value(struct usb_hcd *hcd, u8 pin_number, u8 value)
+max3421_gpout_set_value(struct usb_hcd *hcd, u8 gpout_number, u8 value)
 {
 	struct max3421_hcd *max3421_hcd = hcd_to_max3421(hcd);
-	u8 mask, idx;
-
-	--pin_number;
-	if (pin_number > 7)
+	u8 mask = 0;
+	u8 idx = 0;
+	
+	if (gpout_number > 7)
 		return;
-
-	mask = 1u << pin_number;
-	idx = pin_number / 4;
-
+	
+	/* gpout > 3 are on position 0-3 of IOPINS2 */	
+	if (gpout_number > 3) {
+		gpout_number -= 4;
+		idx = 1;
+	}
+	
+	/* Use a mask to only flip the bit we are aiming for */
+	mask = 1 << gpout_number;
 	if (value)
 		max3421_hcd->iopins[idx] |=  mask;
-	else
+	else 
 		max3421_hcd->iopins[idx] &= ~mask;
+	
+	/* Wake-up register update thread */
 	max3421_hcd->do_iopin_update = 1;
 	wake_up_process(max3421_hcd->spi_thread);
 }
@@ -1700,14 +1717,48 @@ max3421_hub_control(struct usb_hcd *hcd, u16 type_req, u16 value, u16 index,
 {
 	struct spi_device *spi = to_spi_device(hcd->self.controller);
 	struct max3421_hcd *max3421_hcd = hcd_to_max3421(hcd);
+	
 	struct max3421_hcd_platform_data *pdata;
-	unsigned long flags;
+	struct device_node *node = spi->dev.of_node;
+	
+	u32 iargs = 0;
+	unsigned long flags = 0;
 	int retval = 0;
-
+	
+	u8 gpout;			/* pin controlling Vbus */
+	u8 active_level;		/* level that turns on power */
+	
 	spin_lock_irqsave(&max3421_hcd->lock, flags);
 
 	pdata = spi->dev.platform_data;
-
+	if (pdata == NULL) {
+		if (!of_property_read_u32(node, "vbus_gpout", &iargs)) {
+			gpout = (u8)iargs;
+		}
+		else {
+			dev_err(&spi->dev,  
+				"%s: No vbus_gpout defined!\n",
+				__func__);
+			retval = -ENOMEM;
+			goto error;
+		}
+		
+		if (!of_property_read_u32(node, "vbus_active_level", &iargs)) {
+			active_level = (u8)iargs;
+		}
+		else {
+			dev_err(&spi->dev,  
+				"%s: No vbus_active_level defined!\n",
+				__func__);
+			retval = -ENOMEM;
+			goto error;
+		}
+	}
+	else {
+		gpout = pdata->vbus_gpout;
+		active_level = pdata->vbus_active_level;
+	}
+    
 	switch (type_req) {
 	case ClearHubFeature:
 		break;
@@ -1716,9 +1767,10 @@ max3421_hub_control(struct usb_hcd *hcd, u16 type_req, u16 value, u16 index,
 		case USB_PORT_FEAT_SUSPEND:
 			break;
 		case USB_PORT_FEAT_POWER:
-			dev_dbg(hcd->self.controller, "power-off\n");
-			max3421_gpout_set_value(hcd, pdata->vbus_gpout,
-						!pdata->vbus_active_level);
+			dev_dbg(hcd->self.controller, 
+				"power-off   gpout=%d   active_level=%d\n", 
+				gpout, !active_level);
+			max3421_gpout_set_value(hcd, gpout, !active_level);
 			/* FALLS THROUGH */
 		default:
 			max3421_hcd->port_status &= ~(1 << value);
@@ -1765,10 +1817,11 @@ max3421_hub_control(struct usb_hcd *hcd, u16 type_req, u16 value, u16 index,
 					USB_PORT_STAT_SUSPEND;
 			break;
 		case USB_PORT_FEAT_POWER:
-			dev_dbg(hcd->self.controller, "power-on\n");
+			dev_dbg(hcd->self.controller, 
+				"power-on  gpout=%d  active_level=%d\n", 
+				gpout, active_level);
 			max3421_hcd->port_status |= USB_PORT_STAT_POWER;
-			max3421_gpout_set_value(hcd, pdata->vbus_gpout,
-						pdata->vbus_active_level);
+			max3421_gpout_set_value(hcd, gpout, active_level);
 			break;
 		case USB_PORT_FEAT_RESET:
 			max3421_reset_port(hcd);
@@ -1941,12 +1994,19 @@ max3421_remove(struct spi_device *spi)
 	return 0;
 }
 
+static const struct of_device_id max3421_dt_ids[] = {
+    { .compatible = "spi,max3421-hcd" },
+    {},
+};
+MODULE_DEVICE_TABLE(of, max3421_dt_ids);
+
 static struct spi_driver max3421_driver = {
 	.probe		= max3421_probe,
 	.remove		= max3421_remove,
 	.driver		= {
 		.name	= "max3421-hcd",
 		.owner	= THIS_MODULE,
+		.of_match_table = of_match_ptr(max3421_dt_ids),
 	},
 };
 
