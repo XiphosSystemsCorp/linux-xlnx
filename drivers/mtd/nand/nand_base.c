@@ -3135,6 +3135,12 @@ static int nand_flash_detect_onfi(struct mtd_info *mtd, struct nand_chip *chip,
 	mtd->erasesize *= mtd->writesize;
 
 	mtd->oobsize = le16_to_cpu(p->spare_bytes_per_page);
+	// *** HACK HACK HACK ***
+	// Force support for GPIO-based Flash device with degraded ECC
+	// GPIO Flash requests an OOB scheme of 224 but the largest supported by software is 128.
+	// Forcing it to 128 works but ECC is a bit weaker.
+	if ( mtd->oobsize > 128 )
+		mtd->oobsize = 128;
 
 	/* See erasesize comment */
 	chip->chipsize = 1 << (fls(le32_to_cpu(p->blocks_per_lun)) - 1);

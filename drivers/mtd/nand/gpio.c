@@ -118,11 +118,22 @@ static int gpio_nand_get_config_of(const struct device *dev,
 		}
 	}
 
-	plat->gpio_rdy = of_get_gpio(dev->of_node, 0);
+	// *** HACK HACK HACK ***
+	// We cannot get the correct RDY pin from the device tree
+	// Most likely we are passing it wrong (since it is on another bank).
+	// This evil hack was a proof of concept to probe that the hardware is OK
+	//plat->gpio_rdy = of_get_gpio(dev->of_node, 0);
+	plat->gpio_rdy = 0xF0;
 	plat->gpio_nce = of_get_gpio(dev->of_node, 1);
 	plat->gpio_ale = of_get_gpio(dev->of_node, 2);
 	plat->gpio_cle = of_get_gpio(dev->of_node, 3);
 	plat->gpio_nwp = of_get_gpio(dev->of_node, 4);
+	// Added print as it helps debug device-tree
+	pr_info("  plat->gpio_rdy:0x%X\n", plat->gpio_rdy);
+	pr_info("  plat->gpio_nce:0x%X\n", plat->gpio_nce);
+	pr_info("  plat->gpio_ale:0x%X\n", plat->gpio_ale);
+	pr_info("  plat->gpio_cle:0x%X\n", plat->gpio_cle);
+	pr_info("  plat->gpio_nwp:0x%X\n", plat->gpio_nwp);
 
 	if (!of_property_read_u32(dev->of_node, "chip-delay", &val))
 		plat->chip_delay = val;
