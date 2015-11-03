@@ -476,11 +476,6 @@ max3421_set_speed(struct usb_hcd *hcd, struct usb_device *dev)
 		printk(KERN_ERR "max3421_set_speed (max3421_hcd->port_status & USB_PORT_STAT_LOW_SPEED)\n");
 		mode |=  mode_lowspeed;
 		mode &= ~mode_hubpre;
-	/*} else if (max3421_hcd->port_status & USB_PORT_STAT_RESET) {
-		printk(KERN_ERR "max3421_set_speed (max3421_hcd->port_status & USB_PORT_STAT_RESET)\n");
-		mode |= mode_lowspeed | mode_hubpre;
-		max3421_hcd->port_status &= ~USB_PORT_STAT_RESET;
-		max3421_hcd->port_status |=  USB_PORT_STAT_ENABLE;*/
 	} else if (dev->speed == USB_SPEED_LOW) {
 		printk(KERN_ERR "max3421_set_speed (dev->speed == USB_SPEED_LOW)\n");
 		mode |= mode_lowspeed | mode_hubpre;
@@ -1207,6 +1202,7 @@ max3421_detect_conn(struct usb_hcd *hcd)
 			/* need to switch to the other speed: */
 			mode ^= BIT(MAX3421_MODE_LOWSPEED_BIT);
 		}
+		printk(KERN_ERR "max3421_detect_conn SOFKAENAB bit\n");
 		/* turn on SOFKAENAB bit: */
 		mode |= BIT(MAX3421_MODE_SOFKAENAB_BIT);
 		have_conn = 1;
@@ -1557,8 +1553,8 @@ max3421_spi_thread(void *dev_id)
 			 */
 			for (i = 0; i < ARRAY_SIZE(max3421_hcd->iopins); ++i) {
 				// WTH?? WHY 1 PINS??
-				 u8 val = spi_rd8(hcd, MAX3421_REG_IOPINS1 + i);
-				//u8 val = spi_rd8(hcd, MAX3421_REG_IOPINS1);
+				// u8 val = spi_rd8(hcd, MAX3421_REG_IOPINS1 + i);
+				u8 val = spi_rd8(hcd, MAX3421_REG_IOPINS1);
 
 				val = ((val & 0xf0) |
 				       (max3421_hcd->iopins[i] & 0x0f));
@@ -1594,10 +1590,10 @@ max3421_reset(struct usb_hcd *hcd)
 	struct max3421_hcd *max3421_hcd = hcd_to_max3421(hcd);
 
 	hcd->self.sg_tablesize = 0;
-	//hcd->speed = HCD_USB11;
-	hcd->speed = HCD_USB2;
-	//hcd->self.root_hub->speed = USB_SPEED_LOW;
-	hcd->self.root_hub->speed = USB_SPEED_FULL;
+	hcd->speed = HCD_USB11;
+	//hcd->speed = HCD_USB2;
+	hcd->self.root_hub->speed = USB_SPEED_LOW;
+	//hcd->self.root_hub->speed = USB_SPEED_FULL;
 	set_bit(RESET_HCD, &max3421_hcd->todo);
 	wake_up_process(max3421_hcd->spi_thread);
 	return 0;
@@ -1835,7 +1831,9 @@ max3421_hub_control(struct usb_hcd *hcd, u16 type_req, u16 value, u16 index,
 
 	spin_lock_irqsave(&max3421_hcd->lock, flags);
 
-	pdata = spi->dev.platform_data;
+	//pdata = spi->dev.platform_data;
+	//printk(KERN_ERR "max3421_hub_control vbus_gpout 0x%x\n", pdata->vbus_gpout);
+    //printk(KERN_ERR "max3421_hub_control vbus_active_level 0x%x \n", pdata->vbus_active_level);
 
 	switch (type_req) {
 	case ClearHubFeature:
@@ -1850,7 +1848,8 @@ max3421_hub_control(struct usb_hcd *hcd, u16 type_req, u16 value, u16 index,
 		case USB_PORT_FEAT_POWER:
 			printk(KERN_ERR "max3421_hub_control ClearPortFeature USB_PORT_FEAT_POWER\n");
 			dev_dbg(hcd->self.controller, "power-off\n");
-			max3421_gpout_set_value(hcd, pdata->vbus_gpout, !pdata->vbus_active_level);
+			//max3421_gpout_set_value(hcd, pdata->vbus_gpout, !pdata->vbus_active_level);
+			max3421_gpout_set_value(hcd, 7, !1);
 			/* FALLS THROUGH */
 		default:
 			printk(KERN_ERR "max3421_hub_control ClearPortFeature default\n");
@@ -1909,7 +1908,8 @@ max3421_hub_control(struct usb_hcd *hcd, u16 type_req, u16 value, u16 index,
 			printk(KERN_ERR "max3421_hub_control SetPortFeature USB_PORT_FEAT_POWER\n");
 			dev_dbg(hcd->self.controller, "power-on\n");
 			max3421_hcd->port_status |= USB_PORT_STAT_POWER;
-			max3421_gpout_set_value(hcd, pdata->vbus_gpout, pdata->vbus_active_level);
+			//max3421_gpout_set_value(hcd, pdata->vbus_gpout, pdata->vbus_active_level);
+			max3421_gpout_set_value(hcd, 7, 1);
 			break;
 		case USB_PORT_FEAT_RESET:
 			printk(KERN_ERR "max3421_hub_control SetPortFeature USB_PORT_FEAT_RESET\n");
@@ -2015,7 +2015,8 @@ max3421_probe(struct spi_device *spi)
 	max3421_hcd->next = max3421_hcd_list;
 	max3421_hcd_list = max3421_hcd;
 	INIT_LIST_HEAD(&max3421_hcd->ep_list);
-	
+
+	/*	
 	pdata = spi->dev.platform_data;
     if (pdata == NULL) {
 		pdata = devm_kzalloc(&spi->dev, sizeof(*pdata), GFP_KERNEL);
@@ -2046,6 +2047,9 @@ max3421_probe(struct spi_device *spi)
             goto error;
         }
 	}
+	printk(KERN_ERR "max3421_probe vbus_gpout 0x%x\n", pdata->vbus_gpout);
+	printk(KERN_ERR "max3421_probe vbus_active_level 0x%x \n", pdata->vbus_active_level);
+	*/
 
 	max3421_hcd->tx = kmalloc(sizeof(*max3421_hcd->tx), GFP_KERNEL);
 	if (!max3421_hcd->tx) {
@@ -2080,7 +2084,7 @@ max3421_probe(struct spi_device *spi)
 	}
 	
 
- 
+	/*
 	int test_nb=0;
 	u8 value=0;
 	u8 read_test=0;
@@ -2100,6 +2104,7 @@ max3421_probe(struct spi_device *spi)
 			value=0;
 		}
 	}
+	*/
 
 	return 0;
 
