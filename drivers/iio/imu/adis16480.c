@@ -198,6 +198,24 @@ static int adis16480_show_serial_number(void *arg, u64 *val)
 DEFINE_SIMPLE_ATTRIBUTE(adis16480_serial_number_fops,
 	adis16480_show_serial_number, NULL, "0x%.4llx\n");
 
+static int adis16480_show_system_status(void *arg, u64 *val)
+{
+	struct adis16480 *adis16480 = arg;
+	u16 sys_status;
+	int ret;
+
+	ret = adis_read_reg_16(&adis16480->adis, ADIS16480_REG_SYS_E_FLA,
+		&sys_status);
+	if (ret < 0)
+		return ret;
+
+	*val = sys_status;
+
+	return 0;
+}
+DEFINE_SIMPLE_ATTRIBUTE(adis16480_system_status_fops,
+	adis16480_show_system_status, NULL, "0x%.4llx\n");
+
 static int adis16480_show_product_id(void *arg, u64 *val)
 {
 	struct adis16480 *adis16480 = arg;
@@ -249,7 +267,8 @@ static int adis16480_debugfs_init(struct iio_dev *indio_dev)
 		adis16480, &adis16480_product_id_fops);
 	debugfs_create_file("flash_count", 0400, indio_dev->debugfs_dentry,
 		adis16480, &adis16480_flash_count_fops);
-
+	debugfs_create_file("system_status", 0400, indio_dev->debugfs_dentry,
+		adis16480, &adis16480_system_status_fops);
 	return 0;
 }
 
