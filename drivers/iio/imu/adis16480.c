@@ -796,8 +796,19 @@ static int adis16480_stop_device(struct iio_dev *indio_dev)
 
 static int adis16480_enable_irq(struct adis *adis, bool enable)
 {
-	return adis_write_reg_16(adis, ADIS16480_REG_FNCTIO_CTRL,
-		enable ? BIT(3) : 0);
+	u16 fnctio_ctrl;
+	int ret;
+
+	ret = adis_read_reg_16(adis, ADIS16480_REG_FNCTIO_CTRL, &fnctio_ctrl);
+	if (ret < 0)
+		return ret;
+
+	if (enable)
+		fnctio_ctrl |= BIT(3);
+	else
+		fnctio_ctrl &= ~BIT(3);
+
+	return adis_write_reg_16(adis, ADIS16480_REG_FNCTIO_CTRL, fnctio_ctrl);
 }
 
 static int adis16480_initial_setup(struct iio_dev *indio_dev)
