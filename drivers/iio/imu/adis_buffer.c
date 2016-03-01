@@ -8,6 +8,8 @@
  */
 
 #include <linux/export.h>
+#include <linux/gpio/consumer.h>
+#include <linux/gpio.h>
 #include <linux/interrupt.h>
 #include <linux/mutex.h>
 #include <linux/kernel.h>
@@ -130,6 +132,7 @@ int adis_setup_buffer_and_trigger(struct adis *adis, struct iio_dev *indio_dev,
 	irqreturn_t (*trigger_handler)(int, void *))
 {
 	int ret;
+	struct gpio_desc *desc;
 
 	if (!trigger_handler)
 		trigger_handler = adis_trigger_handler;
@@ -138,6 +141,42 @@ int adis_setup_buffer_and_trigger(struct adis *adis, struct iio_dev *indio_dev,
 		trigger_handler, NULL);
 	if (ret)
 		return ret;
+
+	if (!(adis->spi->irq)) {
+	/* Ideally, this hardcoded value would come from the device tree.
+	 * This would be done using the gpiod_get function call:
+	 *
+	 * desc = gpiod_get(&(adis->spi->dev), "drdy");
+	 *
+	 * However this doesn't seem to give the correct GPIO -> probably
+	 * a bug related to 2 banks of gpios per chip in the xilinx
+	 * controller (noticed that using "cat /sys/kernel/debug/gpio")
+	 *
+	 * So until that is fixed, we're using the hardcoded gpio and
+	 * the legacy gpio_request interface */
+
+#define DRDY_GPIO_NUMBER (233)
+
+		ret = devm_gpio_request(&(adis->spi->dev), DRDY_GPIO_NUMBER, "DRDY");
+		if (ret) {
+			printk(KERN_INFO "Error requesting GPIO\n");
+			goto error_buffer_cleanup;
+		}
+
+		desc = gpio_to_desc(DRDY_GPIO_NUMBER);
+		if (IS_ERR(desc)) {
+			printk(KERN_INFO "Error getting GPIO descriptor (desc = %d)!\n",
+				desc);
+			goto error_buffer_cleanup;
+		}
+
+		if (gpiod_direction_input(desc) != 0) {
+			printk(KERN_INFO "Error setting GPIO direction\n");
+			goto error_buffer_cleanup;
+		}
+
+		adis->spi->irq = gpiod_to_irq(desc);
+	}
 
 	if (adis->spi->irq) {
 		ret = adis_probe_trigger(adis, indio_dev);
