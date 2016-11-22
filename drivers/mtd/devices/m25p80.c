@@ -1340,6 +1340,9 @@ static const struct spi_device_id m25p_ids[] = {
 	{ "n25q00aa13", INFO(0x20ba21,  0, 64 * 1024,  2048,
 			     SECT_4K | E_FSR | M25P80_QUAD_READ |
 			     M25P_FLASH_LOCK) },
+	{ "n25q00aa", INFO(0x20bb21,  0, 64 * 1024,  2048,
+	             SECT_4K | E_FSR | M25P80_QUAD_READ |
+	             M25P_FLASH_LOCK) },
 
 	/* PMC */
 	{ "pm25lv512",   INFO(0,        0, 32 * 1024,    2, SECT_4K_PMC) },
