@@ -895,7 +895,7 @@ static int spi_nor_lock(struct mtd_info *mtd, loff_t ofs, uint64_t len)
 	if (lock_bits > bp_bits_from_sr(nor, status))
 		ret = write_sr_modify_protection(nor, status, lock_bits);
 	else
-		dev_err(nor->dev, "trying to unlock already locked area\n");
+		dev_dbg(nor->dev, "Trying to unlock already unlocked area\n");
 
 err:
 	spi_nor_unlock_and_unprep(nor, SPI_NOR_OPS_LOCK);
@@ -938,7 +938,7 @@ static int spi_nor_unlock(struct mtd_info *mtd, loff_t ofs, uint64_t len)
 	if (lock_bits < bp_bits_from_sr(nor, status))
 		ret = write_sr_modify_protection(nor, status, lock_bits);
 	else
-		dev_err(nor->dev, "trying to lock already unlocked area\n");
+		dev_dbg(nor->dev, "Trying to lock already locked area\n");
 
 err:
 	spi_nor_unlock_and_unprep(nor, SPI_NOR_OPS_UNLOCK);
@@ -956,6 +956,18 @@ static int spi_nor_is_locked(struct mtd_info *mtd, loff_t ofs, uint64_t len)
 	ret = spi_nor_lock_and_prep(nor, SPI_NOR_OPS_UNLOCK);
 	if (ret)
 		return ret;
+
+	if (nor->isparallel == 1)
+		offset /= 2;
+
+	if (nor->isstacked == 1) {
+		if (offset >= (mtd->size / 2)) {
+			offset = offset - (mtd->size / 2);
+			nor->spi->master->flags |= SPI_MASTER_U_PAGE;
+		} else
+			nor->spi->master->flags &= ~SPI_MASTER_U_PAGE;
+	}
+
 	/* Wait until finished previous command */
 	ret = spi_nor_wait_till_ready(nor);
 	if (ret)
@@ -966,7 +978,7 @@ static int spi_nor_is_locked(struct mtd_info *mtd, loff_t ofs, uint64_t len)
 						bp_bits_from_sr(nor, status));
 	if (offset >= protected_area_start)
 		ret = MTD_IS_LOCKED;
-	else if (offset+len < protected_area_start)
+	else if ( (offset+len) <= protected_area_start)
 		ret = MTD_IS_UNLOCKED;
 	else
 		ret = MTD_IS_PARTIALLY_LOCKED;
